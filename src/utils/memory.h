@@ -2,7 +2,7 @@
 #include <cstdint>
 #include <vector>
 #include <functional>
-#include "vendor/minhook/include/MinHook.h"
+#include <MinHook.h>
 #include "log.h"
 
 class memory {
@@ -22,10 +22,23 @@ public:
 
 		static void run()
 		{
+			// Each installer only pattern-scans and hooks, but a bad scan
+			// result must not take the game down before the log says which
+			// installer it was.
+			int index = 0;
 			for (auto& cb : funcs())
 			{
-				cb.fn();
+				try
+				{
+					cb.fn();
+				}
+				catch (...)
+				{
+					logger::write("info", "hook installer %d threw", index);
+				}
+				++index;
 			}
+			logger::write("info", "hooks: %d installer(s) done", index);
 		}
 
 		InitFuncs(const std::function<void()>& fn) : fn(fn)
@@ -122,7 +135,7 @@ public:
 		memory(address + 1, false).put(int32_t(func - address - 5));
 	}
 
-	inline void set_call(void* func, bool ret = false)
+	inline void set_call(uintptr_t func, bool ret = false)
 	{
 		memory jmpMem = get_virtual_mem(12);
 
@@ -132,6 +145,14 @@ public:
 			jmpMem.make_jmp((uintptr_t)func);
 
 		make_call(jmpMem.address);
+	}
+
+	// Function pointers do not implicitly convert to void* under GCC/Clang, so
+	// detour installation goes through a template that casts explicitly.
+	template <typename Fn>
+	inline void set_call(Fn func, bool ret = false)
+	{
+		set_call((uintptr_t)func, ret);
 	}
 
 	template<typename T>

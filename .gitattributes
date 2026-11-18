@@ -1,0 +1,10 @@
+# Shell scripts must stay LF: a CRLF checkout makes bash fail on line 1.
+*.sh text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Source files are edited on Windows as well; keep line endings stable.
+*.c text
+*.h text
+*.cpp text
+*.md text

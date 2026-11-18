@@ -9,6 +9,8 @@
 #include <vector>
 
 #include "utils/log.h"
+#include "utils/logbridge.h"
+#include "utils/forensics.h"
 #include "utils/memory.h"
 #include "utils/rpf.h"
 #include "utils/config.h"

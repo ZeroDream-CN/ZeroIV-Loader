@@ -38,6 +38,8 @@ bool ParseHeaderHook(rage::fiPackfile* a1, const char* name, bool readHeader, vo
 {
 	bool ret = ParseHeaderOrig(a1, name, readHeader, customHeader);
 	logger::log("mods", "[%s] parsed header /%s", __FUNCTION__, name);
+	if (name)
+		forensics::note_file(name);
 	if (ret)
 	{
 		if (IsEnhanced()) {
@@ -45,18 +47,66 @@ bool ParseHeaderHook(rage::fiPackfile* a1, const char* name, bool readHeader, vo
 			a1 = reinterpret_cast<rage::fiPackfile*>(reinterpret_cast<uintptr_t>(a1) + 0x8);
 		}
 		logger::log("mods", "[%s] fileCount /%d", __FUNCTION__, a1->filesCount);
-		for (int i = 0; i < a1->filesCount; ++i)
+
+		// The archive records its own encryption; trusting the global set by
+		// FindEncryptionHook is not safe because Enhanced streams archives from
+		// several threads at once. A stale OPEN from the unencrypted mod pack
+		// would make an encrypted stock archive be treated as plain text, and
+		// the resources read out of it are garbage.
+		const bool openByArchive = a1->encryptionMagic == OPEN;
+		const bool openByGlobal = currentEncryption == OPEN;
+
+		// A bogus count would walk off the entry table and corrupt the heap.
+		const int count = a1->filesCount;
+		const bool sane = count >= 0 && count <= 1000000 && a1->entryTable != nullptr;
+		if (!sane)
 		{
-			Entry* v21 = (Entry*)(a1->entryTable + 16 * i);
-			if (v21->IsBinary() && v21->bin.nameOffset > 0 && v21->bin.isEncrypted)
-			{
-				if (currentEncryption == OPEN)
-					v21->bin.isEncrypted = 0xFEFFFFF;
-			}
+			logger::write("mods", "[%s] refusing archive /%s: filesCount=%d entryTable=%p",
+				__FUNCTION__, name, count, (void*)a1->entryTable);
+			return ret;
 		}
 
-		if (currentEncryption == OPEN)
+		const bool open = openByArchive || openByGlobal;
+		int patched = 0;
+
+		// A mod archive reaching this point has been opened and its entry table
+		// parsed, which is what "the game can actually see the models" means.
+		// Logged unconditionally for mod packs: if a car never appears, this
+		// line decides whether the engine rejected the archive or never got to
+		// it, and that is the difference between a bad model and a bad loader.
+		if (name && strstr(name, "nisa31"))
+			logger::write("pack", "[%s] parsed %s: %d entries, open=%d, table=%p",
+				__FUNCTION__, name, count, (int)open, (void*)a1->entryTable);
+
+		// GTA V parses an OPEN (unencrypted) RPF7 by itself, so poking the entry
+		// table is only needed on builds that reject them. The switch lets that
+		// be ruled out without a rebuild when a mod archive misbehaves.
+		static const bool allowPatching = config::get_value<bool>("config", "allowUnencryptedRpf", true);
+		if (open && allowPatching)
+		{
+			for (int i = 0; i < count; ++i)
+			{
+				Entry* v21 = (Entry*)(a1->entryTable + 16 * i);
+				if (v21->IsBinary() && v21->bin.nameOffset > 0 && v21->bin.isEncrypted)
+				{
+					v21->bin.isEncrypted = 0xFEFFFFF;
+					++patched;
+				}
+			}
+
 			a1->currentFileOffset = 0xFEFFFFF;
+		}
+
+		// Unencrypted archives are rare (only the mod packs), so this stays
+		// always-on: it is the line that tells whether a mod archive was
+		// actually accepted. The fallback marker flags the cross-thread case.
+		if (openByArchive || patched > 0)
+		{
+			logger::write("mods", "[%s] unencrypted archive /%s: %d entries, patched %d%s%s",
+				__FUNCTION__, name, count, patched,
+				openByArchive ? "" : " (stale global, no per-archive marker)",
+				allowPatching ? "" : " (patching disabled by config)");
+		}
 	}
 	return ret;
 }

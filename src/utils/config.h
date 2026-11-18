@@ -1,4 +1,8 @@
 #pragma once
+#include <cstring>
+#include <filesystem>
+#include <string>
+
 #include "inicpp.h"
 
 class config
@@ -12,34 +16,146 @@ public:
 
 	static void load()
 	{
-		if (std::filesystem::exists("RageOpenV.ini"))
+		constexpr const char* kIniPath = "ZeroIV.ini";
+		constexpr const char* kLegacyIniPath = "RageOpenV.ini";
+
+		// Keep settings from installs that predate the ZeroIV-Loader rename.
+		if (!std::filesystem::exists(kIniPath) && std::filesystem::exists(kLegacyIniPath))
 		{
-			get_ini().load("RageOpenV.ini");
+			std::error_code ec;
+			std::filesystem::rename(kLegacyIniPath, kIniPath, ec);
+			if (ec)
+			{
+				ec.clear();
+				std::filesystem::copy_file(kLegacyIniPath, kIniPath, ec);
+			}
 		}
-		else
-		{	//defaults
-			get_ini()["config"]["console"] = false;
-			get_ini()["log"]["info"] = false;
-			get_ini()["log"]["mods"] = false;
-			get_ini()["log"]["rpf"] = false;
-			get_ini()["log"]["device"] = false;
+
+		if (std::filesystem::exists(kIniPath))
+		{
+			try
+			{
+				get_ini().load(kIniPath);
+			}
+			catch (...)
+			{
+				// A hand-edited file with a syntax error must not take the game
+				// down; fall back to defaults and rewrite it below.
+				get_ini().clear();
+			}
+		}
+
+		// Re-add keys missing from an older or hand-edited file so upgrades
+		// never leave the loader querying an empty field.
+		bool added = false;
+		add_default<bool>("config", "console", false, added);
+		add_default<bool>("config", "modsOverride", true, added);
+		add_default<bool>("config", "allowUnencryptedRpf", true, added);
+		add_default<bool>("config", "dumpImage", false, added);
+		add_default<bool>("log", "info", false, added);
+		add_default<bool>("log", "mods", false, added);
+		add_default<bool>("log", "rpf", false, added);
+		add_default<bool>("log", "device", false, added);
+		add_default<bool>("debugConsole", "enabled", true, added);
+		add_default<std::string>("debugConsole", "host", "127.0.0.1", added);
+		add_default<int>("debugConsole", "port", 27183, added);
+		if (added)
 			save();
-		}
+
+		cache_switches();
 	}
 
 	static void save()
 	{
-		get_ini().save("RageOpenV.ini");
+		get_ini().save("ZeroIV.ini");
 	}
 
 	template<typename T>
 	static T get_config(const char* key)
 	{
-		return get_ini()["config"][key].as<T>();
+		return get_value<T>("config", key, T{});
 	}
 
 	static bool get_log(const char* key)
 	{
-		return get_ini()["log"][key].as<bool>();
+		return log_enabled(key);
+	}
+
+	// Hot-path switches, cached at load time. logger::log runs per file
+	// operation, so it must not build a std::string key and walk the ini map on
+	// every call.
+	static bool log_enabled(const char* key)
+	{
+		if (key == nullptr)
+			return false;
+		const Switches& s = switches();
+		if (std::strcmp(key, "info") == 0)
+			return s.info;
+		if (std::strcmp(key, "mods") == 0)
+			return s.mods;
+		if (std::strcmp(key, "rpf") == 0)
+			return s.rpf;
+		if (std::strcmp(key, "device") == 0)
+			return s.device;
+		return false;
+	}
+
+	// Reads one value with a fallback, so a missing section/key or a malformed
+	// value never throws inside the game process.
+	template<typename T>
+	static T get_value(const char* section, const char* key, T fallback)
+	{
+		auto& iniFile = get_ini();
+		auto sec = iniFile.find(section);
+		if (sec == iniFile.end())
+			return fallback;
+		auto field = sec->second.find(key);
+		if (field == sec->second.end())
+			return fallback;
+		try
+		{
+			return field->second.template as<T>();
+		}
+		catch (...)
+		{
+			return fallback;
+		}
+	}
+
+private:
+	struct Switches
+	{
+		bool info = false;
+		bool mods = false;
+		bool rpf = false;
+		bool device = false;
+	};
+
+	static Switches& switches()
+	{
+		static Switches s;
+		return s;
+	}
+
+	// Called once at the end of load(), after the ini is fully read.
+	static void cache_switches()
+	{
+		Switches& s = switches();
+		s.info = get_value<bool>("log", "info", false);
+		s.mods = get_value<bool>("log", "mods", false);
+		s.rpf = get_value<bool>("log", "rpf", false);
+		s.device = get_value<bool>("log", "device", false);
+	}
+
+	template<typename T>
+	static void add_default(const char* section, const char* key, const T& value, bool& added)
+	{
+		auto& iniFile = get_ini();
+		auto sec = iniFile.find(section);
+		if (sec == iniFile.end() || sec->second.find(key) == sec->second.end())
+		{
+			iniFile[section][key] = value;
+			added = true;
+		}
 	}
 };

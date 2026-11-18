@@ -1,4 +1,5 @@
 #include "main.h"
+#include <mutex>
 #include <unordered_map>
 #include <shared_mutex>
 
@@ -41,13 +42,26 @@ static HANDLE OpenBulkImpl(void* device, const char* path, __int64* a3, OpenBulk
 {
     logger::log("info", "[%s] Called with path /%s", __FUNCTION__, path);
 
+    // The engine opens everything through here, so this is the best record of
+    // what it was loading when it decided to stop.
+    if (path)
+        forensics::note_file(path);
+
     std::string modsPath;
     if (path && TryModsPath(path, modsPath))
     {
-        logger::log("mods", "[%s] Redirecting to /%s", __FUNCTION__, modsPath.c_str());
+        // write(), not log(): redirects only happen for files that exist under
+        // mods/, so they are rare, and they are exactly the lines needed to
+        // tell whether a mod archive is being served.
+        logger::write("mods", "[%s] Redirecting to /%s", __FUNCTION__, modsPath.c_str());
         HANDLE result = orig(device, modsPath.c_str(), a3);
         if (result && result != INVALID_HANDLE_VALUE)
             return result;
+        // The file exists under mods/ but the game could not open it: say so,
+        // because silently falling back to the stock path is what makes a mod
+        // pack look "installed but not loading".
+        logger::write("mods", "[%s] Mod file could not be opened: /%s",
+            __FUNCTION__, modsPath.c_str());
     }
     return orig(device, path, a3);
 }
@@ -59,7 +73,10 @@ static FILETIME GetFileTimeImpl(void* device, const char* path, GetFileTimeFn or
     std::string modsPath;
     if (path && TryModsPath(path, modsPath))
     {
-        logger::log("mods", "[%s] Redirecting to /%s", __FUNCTION__, modsPath.c_str());
+        // write(), not log(): redirects only happen for files that exist under
+        // mods/, so they are rare, and they are exactly the lines needed to
+        // tell whether a mod archive is being served.
+        logger::write("mods", "[%s] Redirecting to /%s", __FUNCTION__, modsPath.c_str());
         return orig(device, modsPath.c_str());
     }
     return orig(device, path);
@@ -72,7 +89,10 @@ static uint64_t GetFileSizeImpl(void* device, const char* path, GetFileSizeFn or
     std::string modsPath;
     if (path && TryModsPath(path, modsPath))
     {
-        logger::log("mods", "[%s] Redirecting to /%s", __FUNCTION__, modsPath.c_str());
+        // write(), not log(): redirects only happen for files that exist under
+        // mods/, so they are rare, and they are exactly the lines needed to
+        // tell whether a mod archive is being served.
+        logger::write("mods", "[%s] Redirecting to /%s", __FUNCTION__, modsPath.c_str());
         return orig(device, modsPath.c_str());
     }
     return orig(device, path);
@@ -85,7 +105,10 @@ static uint64_t GetAttribsImpl(void* device, const char* path, GetAttrsFn orig)
     std::string modsPath;
     if (path && TryModsPath(path, modsPath))
     {
-        logger::log("mods", "[%s] Redirecting to /%s", __FUNCTION__, modsPath.c_str());
+        // write(), not log(): redirects only happen for files that exist under
+        // mods/, so they are rare, and they are exactly the lines needed to
+        // tell whether a mod archive is being served.
+        logger::write("mods", "[%s] Redirecting to /%s", __FUNCTION__, modsPath.c_str());
         return orig(device, modsPath.c_str());
     }
     return orig(device, path);
