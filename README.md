@@ -115,6 +115,36 @@ CMake 3.17.x and Visual Studio are needed to build on Windows. Run
 project files for a specific VS version. The binary is produced as
 `BUILD/BIN/Release/ZeroIV.asi`.
 
+### Building on Windows with PowerShell
+
+`build.ps1` drives the same CMake build and needs only Visual Studio (with the
+"Desktop development with C++" workload): CMake is taken from `PATH` or from
+the copy bundled with Visual Studio, and the newest installed VS generator is
+picked automatically.
+
+```powershell
+.\build.ps1                     # release -> BUILD\BIN\Release\ZeroIV.asi
+.\build.ps1 -Logs               # ReleaseWithLogs (_LOG)
+.\build.ps1 -DebugBuild         # BUILD\BIN\Debug\ZeroIV.asi
+.\build.ps1 -Clean -Jobs 8
+.\build.ps1 -Generator ninja    # imports the MSVC environment from vcvars64.bat
+```
+
+Options: `-Configuration` (`Release`, `RelWithDebInfo`, `Debug`), `-Logs`,
+`-Clean`, `-Jobs N`, `-Generator` (`auto`, `ninja`, `vs2026`, `vs2022`,
+`vs2019`), `-Proxy URL` (for the MinHook download; `none` forces direct
+access), `-MinHook DIR` (use a local checkout), `-NoIni`. A default
+`ZeroIV.ini` is written next to the binary and never overwrites an existing
+one.
+
+When `src/vendor/minhook` is not initialized, the script runs `git submodule
+update`; if that fails it downloads the pinned MinHook revision itself, so a
+fresh clone builds without network access to the submodule remote. Behind a
+proxy, pass `-Proxy http://127.0.0.1:7897` or set `ZEROIV_PROXY`; without a
+flag the usual local proxy ports are probed once the network is actually
+needed. If the execution policy blocks the script, run
+`powershell -ExecutionPolicy Bypass -File .\build.ps1`.
+
 ### Cross-compiling on Linux
 
 `scripts/build-cross-linux.sh` builds the same `ZeroIV.asi` with mingw-w64 — no

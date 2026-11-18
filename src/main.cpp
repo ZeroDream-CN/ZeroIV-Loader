@@ -5,6 +5,7 @@
 #endif
 
 #include "utils/forensics.h"
+#include "hooks/BindDescriptorHooks.h"
 
 static bool bInited = false;
 void (*origGetSystemTimeAsFileTime)(LPFILETIME lpSystemTimeAsFileTime);
@@ -41,6 +42,8 @@ void HookGetSystemTimeAsFileTime(LPFILETIME lpSystemTimeAsFileTime)
 		}		
 
 		logger::write("info", "hooks: installing");
+
+		bindhooks::install();
 
 		memory::InitFuncs::run();
 

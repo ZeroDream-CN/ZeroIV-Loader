@@ -1,5 +1,6 @@
 #include "main.h"
 #include "utils/forensics.h"
+#include "hooks/BindDescriptorHooks.h"
 
 #include <cstdio>
 #include <cstring>
@@ -26,7 +27,7 @@ namespace forensics
 		constexpr size_t kMaxExecSections = 8;
 		constexpr size_t kMaxFrames = 40;
 		constexpr size_t kMaxStackBytes = 2048;
-		constexpr size_t kNameLen = 48;
+		constexpr size_t kNameLen = 64;
 		constexpr size_t kNoteCount = 8;
 		constexpr size_t kNoteLen = 160;
 
@@ -164,21 +165,27 @@ namespace forensics
 		{
 			if (dstSize < 2)
 				return;
-			WideCharToMultiByte(CP_ACP, 0, src, -1, dst, (int)dstSize - 1, nullptr, nullptr);
-			dst[dstSize - 1] = 0;
+			// The conversion gets its own oversized buffer: converting straight
+			// into dst failed whenever the full path was longer than dstSize,
+			// which left module names truncated or completely empty.
+			char wide[MAX_PATH * 2] = { 0 };
+			if (WideCharToMultiByte(CP_ACP, 0, src, -1, wide, (int)sizeof(wide) - 1,
+					nullptr, nullptr) <= 0)
+			{
+				dst[0] = 0;
+				return;
+			}
 
-			char* last = nullptr;
-			for (char* p = dst; *p; ++p)
+			const char* from = wide;
+			for (const char* p = wide; *p; ++p)
 			{
 				if (*p == '\\' || *p == '/')
-					last = p;
+					from = p + 1;
 			}
-			if (last)
-			{
-				char* from = last + 1;
-				const size_t len = strlen(from);
-				memmove(dst, from, len + 1);
-			}
+			const size_t len = strlen(from);
+			const size_t copy = len < dstSize - 1 ? len : dstSize - 1;
+			memcpy(dst, from, copy);
+			dst[copy] = 0;
 		}
 
 		// Reads the PE headers of a mapped image and records its executable
@@ -229,11 +236,15 @@ namespace forensics
 			}
 		}
 
-		void resolve_modules()
+		// force=true re-enumerates. Modules loaded after the first call (D3D12,
+		// the shader compiler, overlay DLLs) were previously missing, which is
+		// why a fault inside one of them resolved to "unknown module".
+		void resolve_modules(bool force = false)
 		{
-			if (g_modulesResolved)
+			if (g_modulesResolved && !force)
 				return;
 			g_modulesResolved = true;
+			g_moduleCount = 0;
 
 			HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
 			auto enumModules = kernel ? (EnumProcessModulesFn)GetProcAddress(kernel, "K32EnumProcessModules") : nullptr;
@@ -313,6 +324,160 @@ namespace forensics
 				&& got == sizeof(value);
 		}
 
+		// A module image range check that also accepts non-executable pages, so
+		// a pc landing in data or a JIT page still names its owner.
+		bool nearest_module(uintptr_t addr, char* out, size_t outSize)
+		{
+			if (g_moduleCount == 0)
+				return false;
+			const ModuleEntry* best = nullptr;
+			for (size_t i = 0; i < g_moduleCount; ++i)
+			{
+				const ModuleEntry& m = g_modules[i];
+				if (addr >= m.base && addr < m.imageEnd)
+					best = &m;
+			}
+			if (!best)
+				return false;
+			snprintf(out, outSize, "%s+0x%llX", best->name, (unsigned long long)(addr - best->base));
+			return true;
+		}
+
+		// Writes every loaded module and its range. The crash pc could not be
+		// attributed to a module last time because the module table was stale,
+		// so the table itself is now part of the evidence.
+		void dump_modules()
+		{
+			logger::write("fatal", "  modules (%llu):", (unsigned long long)g_moduleCount);
+			for (size_t i = 0; i < g_moduleCount; ++i)
+			{
+				const ModuleEntry& m = g_modules[i];
+				logger::write("fatal", "    %s base=0x%llX end=0x%llX",
+					m.name, (unsigned long long)m.base, (unsigned long long)m.imageEnd);
+			}
+		}
+
+		// dbghelp is resolved once, at install time. Loading it from inside the
+		// handler would take the loader lock while the process is already in a
+		// fault, which can deadlock instead of writing a dump.
+		using MiniDumpWriteDumpFn = BOOL(WINAPI*)(HANDLE, DWORD, HANDLE, uint32_t, void*, void*, void*);
+		MiniDumpWriteDumpFn g_miniDumpWrite = nullptr;
+		bool g_dumped = false;
+
+		// MINIDUMP_EXCEPTION_INFORMATION, declared here so the dump path does
+		// not need the dbghelp headers.
+		struct MiniDumpExceptionInfo
+		{
+			DWORD ThreadId;
+			EXCEPTION_POINTERS* ExceptionPointers;
+			BOOL ClientPointers;
+		};
+
+		// Logs raw bytes as hex. The in-memory image is authoritative: the
+		// executable on disk is packed, and a driver patch could differ too.
+		void dump_bytes(const char* tag, uintptr_t addr, size_t len)
+		{
+			if (addr == 0 || len == 0 || len > 128)
+				return;
+			unsigned char raw[128] = { 0 };
+			SIZE_T got = 0;
+			if (!ReadProcessMemory(GetCurrentProcess(), (LPCVOID)addr, raw, len, &got) || got == 0)
+			{
+				logger::write("fatal", "  %s @0x%llX unreadable", tag, (unsigned long long)addr);
+				return;
+			}
+			char line[128 * 2 + 16] = { 0 };
+			size_t used = 0;
+			for (SIZE_T i = 0; i < got && used + 3 < sizeof(line); ++i)
+				used += (size_t)snprintf(line + used, sizeof(line) - used, "%02X", raw[i]);
+			logger::write("fatal", "  %s @0x%llX = %s", tag, (unsigned long long)addr, line);
+		}
+
+		// The game binds a shader's resources with one ID3D12Device::CopyDescriptors
+		// call: it builds an array of D3D12_CPU_DESCRIPTOR_HANDLE (8 bytes per
+		// entry) on the stack from a resource table, a matching array of sizes,
+		// and hands both to the driver.
+		//
+		// The live values are no longer recovered from the faulting context:
+		// by then the registers belong to the driver, not to the game call, and
+		// guessing from r9/r13 produced misleading output. BindDescriptorHooks
+		// records the real arguments into a lock-free ring as the game calls
+		// CopyDescriptors, so the newest records are printed here instead.
+		void dump_descriptor_arrays(const CONTEXT*)
+		{
+			bindhooks::dump_recent(8);
+		}
+
+		// Writes one minidump for the first access violation of the session.
+		// Every thread's stack is included, plus the info needed to resolve the
+		// addresses offline against the dumped image; full memory is left out
+		// because this process maps many gigabytes.
+		void write_minidump(EXCEPTION_POINTERS* info, const char* path)
+		{
+			if (!g_miniDumpWrite || g_dumped)
+				return;
+			g_dumped = true;
+
+			HANDLE file = CreateFileA(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+				FILE_ATTRIBUTE_NORMAL, nullptr);
+			if (file == INVALID_HANDLE_VALUE)
+			{
+				logger::write("fatal", "  [dump] cannot create %s (err %lu)", path, GetLastError());
+				return;
+			}
+
+			MiniDumpExceptionInfo dumpInfo{ GetCurrentThreadId(), info, FALSE };
+			const uint32_t flags =
+				0x00000000 | // MiniDumpNormal: module list + thread stacks
+				0x00000040 | // MiniDumpWithIndirectlyReferencedMemory
+				0x00000100 | // MiniDumpWithProcessThreadData
+				0x00000800 | // MiniDumpWithFullMemoryInfo
+				0x00001000;  // MiniDumpWithThreadInfo
+			const BOOL ok = g_miniDumpWrite(GetCurrentProcess(), GetCurrentProcessId(),
+				file, flags, &dumpInfo, nullptr, nullptr);
+			CloseHandle(file);
+			logger::write("fatal", "  [dump] %s (ok=%d, err %lu)", path, ok ? 1 : 0, ok ? 0UL : GetLastError());
+		}
+
+		// Prints what a register points at when it looks like an object with a
+		// vtable. A call through a null method pointer lands at pc=0 and leaves
+		// the object that should have supplied it in an argument register, so
+		// the vtable slot is what identifies the failing class.
+		void probe_object(const char* name, uintptr_t obj)
+		{
+			if (obj < 0x10000)
+				return;
+			uintptr_t vt = 0;
+			if (!read_word(obj, vt) || vt == 0)
+			{
+				logger::write("fatal", "  %s=0x%llX vt=0", name, (unsigned long long)obj);
+				return;
+			}
+			char where[160] = { 0 };
+			if (!describe(vt, where, sizeof(where)))
+			{
+				logger::write("fatal", "  %s=0x%llX vt=0x%llX", name, (unsigned long long)obj,
+					(unsigned long long)vt);
+				return;
+			}
+			logger::write("fatal", "  %s=0x%llX vt=%s", name, (unsigned long long)obj, where);
+			for (uintptr_t slot = 0; slot < 4 * sizeof(uintptr_t); slot += sizeof(uintptr_t))
+			{
+				uintptr_t fn = 0;
+				if (!read_word(vt + slot, fn) || fn == 0)
+				{
+					logger::write("fatal", "    vt+0x%llX = 0", (unsigned long long)slot);
+					continue;
+				}
+				char fnWhere[160] = { 0 };
+				if (describe(fn, fnWhere, sizeof(fnWhere)))
+					logger::write("fatal", "    vt+0x%llX = %s", (unsigned long long)slot, fnWhere);
+				else
+					logger::write("fatal", "    vt+0x%llX = 0x%llX", (unsigned long long)slot,
+						(unsigned long long)fn);
+			}
+		}
+
 		bool already_seen(uint32_t code, uintptr_t addr)
 		{
 			for (size_t i = 0; i < g_seenCount; ++i)
@@ -366,10 +531,14 @@ namespace forensics
 		{
 			const uint32_t code = info->ExceptionRecord->ExceptionCode;
 			const uintptr_t addr = (uintptr_t)info->ExceptionRecord->ExceptionAddress;
-			resolve_modules();
+			// Re-enumerated every time: a module loaded after the first call
+			// (D3D12, the shader compiler) would otherwise be missing and its
+			// fault would read back as "unknown module".
+			resolve_modules(true);
 
 			char where[160] = { 0 };
-			describe(addr, where, sizeof(where));
+			if (!describe(addr, where, sizeof(where)))
+				nearest_module(addr, where, sizeof(where));
 
 			if (already_seen(code, addr))
 				return;
@@ -455,6 +624,55 @@ namespace forensics
 					(unsigned long long)info->ContextRecord->R13,
 					(unsigned long long)info->ContextRecord->R14,
 					(unsigned long long)info->ContextRecord->R15);
+
+				// Raw fault coordinates. describe() only prints these when the
+				// address resolves, and a null indirect call is exactly the case
+				// where nothing resolves: pc sits at 0 and there is no module.
+				logger::write("fatal", "  pc=0x%llX sp=0x%llX thread=%lu",
+					(unsigned long long)info->ContextRecord->Rip,
+					(unsigned long long)info->ContextRecord->Rsp,
+					(unsigned long)GetCurrentThreadId());
+
+				// A read of address 0 at a pc of 0 is a call through a null
+				// function pointer. The object that owns the missing method is
+				// normally still in an argument register.
+				if (info->ContextRecord->Rip == 0)
+				{
+					probe_object("rcx", (uintptr_t)info->ContextRecord->Rcx);
+					probe_object("rdx", (uintptr_t)info->ContextRecord->Rdx);
+					probe_object("r8 ", (uintptr_t)info->ContextRecord->R8);
+					probe_object("r9 ", (uintptr_t)info->ContextRecord->R9);
+				}
+
+				// Surrounding instructions plus the structs the faulting call
+				// was handed. A driver fault at a fixed offset is decided by
+				// what the game passed in, not by the driver itself.
+				{
+					char owner[160] = { 0 };
+					if (pc >= 0x20 && !describe(pc, owner, sizeof(owner)))
+						nearest_module(pc, owner, sizeof(owner));
+					if (owner[0])
+						logger::write("fatal", "  pc owner: %s", owner);
+					dump_bytes("code", pc - 0x20, 0x40);
+					dump_bytes("rcx[0..0x60]", (uintptr_t)info->ContextRecord->Rcx, 0x60);
+					dump_bytes("r8 [0..0x60]", (uintptr_t)info->ContextRecord->R8, 0x60);
+					dump_bytes("r11", (uintptr_t)info->ContextRecord->R11, 0x20);
+
+					// Only meaningful when the fault is outside the game image:
+					// that is the game handing bad data across an API boundary.
+					const auto* exe = reinterpret_cast<const uint8_t*>(GetModuleHandleW(nullptr));
+					const bool inExe = exe && pc >= (uintptr_t)exe && pc < (uintptr_t)exe + 0x10000000;
+					if (!inExe)
+						dump_descriptor_arrays(info->ContextRecord);
+				}
+
+				// Only access violations get a dump: the breakpoint path is the
+				// game's own orderly stop and repeats several times on the way
+				// out.
+				if (code == 0xC0000005)
+					write_minidump(info, "ZeroIV.crash.dmp");
+
+				dump_modules();
 
 				// The error handler is still holding its message here. Try the
 				// argument registers first, then anything on the stack that
@@ -594,6 +812,21 @@ namespace forensics
 			logger::write("info", "forensics: vectored handler not installed");
 		else
 			logger::write("info", "forensics: handler installed");
+
+		// Resolved here, once, while the process is healthy. Writing a dump
+		// from inside the handler cannot take the loader lock safely.
+		if (HMODULE dbghelp = LoadLibraryW(L"dbghelp.dll"))
+		{
+			g_miniDumpWrite = (MiniDumpWriteDumpFn)GetProcAddress(dbghelp, "MiniDumpWriteDump");
+			if (g_miniDumpWrite)
+				logger::write("info", "forensics: minidump writer ready");
+			else
+				logger::write("info", "forensics: MiniDumpWriteDump not found");
+		}
+		else
+		{
+			logger::write("info", "forensics: dbghelp.dll unavailable");
+		}
 
 		// Hooking the debug-output API itself, because the exception form of it
 		// only exists while a debugger is attached.
