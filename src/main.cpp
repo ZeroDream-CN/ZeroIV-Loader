@@ -96,6 +96,13 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  dwReason, LPVOID lpReserved)
 		logger::write("info", "attach: mods root %s", config::mods_root().string().c_str());
 		logger::write("info", "attach: unpack root %s", config::unpack_root().string().c_str());
 
+		// The console stays empty when this port does not match ZeroIV's
+		// listener, which is otherwise indistinguishable from a dead loader.
+		if (logbridge::enabled())
+			logger::write("info", "attach: log bridge %s", logbridge::target().c_str());
+		else
+			logger::write("info", "attach: log bridge disabled by config");
+
 		memory::init();
 
 		logger::write("info", "attach: memory initialised");

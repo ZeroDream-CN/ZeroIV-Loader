@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 // Real-time log forwarding from the ASI loaded inside GTA V to ZeroIV's debug
 // console (rpf-browser-go). The transport is a loopback TCP stream: the game
 // process dials 127.0.0.1:<port> and streams newline-delimited records.
@@ -23,4 +25,12 @@ namespace logbridge
 	// Starts the sender thread when allowed. enqueue() calls this itself; it is
 	// exported so a game-thread call site can flush lines queued from DllMain.
 	void ensure_started();
+
+	// Whether forwarding was enabled in the ini.
+	bool enabled();
+
+	// "host:port" the sender dials, for the startup log. A port mismatch
+	// between the ini and ZeroIV is otherwise invisible: the console simply
+	// stays empty.
+	std::string target();
 }

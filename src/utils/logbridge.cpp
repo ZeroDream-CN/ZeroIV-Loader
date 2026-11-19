@@ -206,6 +206,17 @@ void logbridge::init()
 	g_enabled.store(enabled);
 }
 
+bool logbridge::enabled()
+{
+	return g_enabled.load();
+}
+
+std::string logbridge::target()
+{
+	std::lock_guard<std::mutex> lock(g_configMutex);
+	return g_host + ":" + std::to_string(g_port);
+}
+
 void logbridge::set_inside_dll_main(bool inside)
 {
 	g_insideDllMain.store(inside);
