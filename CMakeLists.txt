@@ -32,7 +32,22 @@ endif()
 # reports a missing dependency in its own log.
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-file(GLOB_RECURSE PROJECT_SOURCE_FILES "src/*.h" "src/*.cpp")
+# CONFIGURE_DEPENDS makes the build notice files added to src/ without a manual
+# reconfigure: the project pulls its sources in with a glob, and an existing
+# build tree would otherwise keep compiling yesterday's file list.
+file(GLOB_RECURSE PROJECT_SOURCE_FILES CONFIGURE_DEPENDS "src/*.h" "src/*.cpp" "src/*.rc")
+
+# The NG key tables come out of the retail game and are deliberately not tracked,
+# so a fresh clone has no src/resources/ngdata.bin. The resource is emitted only
+# when one is present: without it ngcrypt::init() reports the cipher unavailable
+# and every caller fails cleanly, rather than the resource compiler aborting the
+# build for everybody who did not extract the tables.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/resources/ngdata.bin")
+    set(ZEROIV_NGDATA "NGDATA RCDATA \"ngdata.bin\"")
+else()
+    set(ZEROIV_NGDATA "// no ngdata.bin here: the RPF7 cipher stays unavailable")
+endif()
+file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/src/resources/ngdata.rcinc" "${ZEROIV_NGDATA}\n")
 
 macro(GroupSources curdir groupindex)
     file(GLOB children RELATIVE ${curdir} ${curdir}/*)
@@ -71,6 +86,10 @@ set_target_properties(ZeroIVLoader PROPERTIES
 target_compile_definitions(ZeroIVLoader PRIVATE
     ZEROIV_LOADER_VERSION="${PROJECT_VERSION}"
     ZEROIV_LOADER_COMMIT="${ZEROIV_COMMIT}")
+
+# Sources are UTF-8, and the loader's prompts carry Chinese text. Without this
+# MSVC reads them in the system code page and rejects the literals.
+target_compile_options(ZeroIVLoader PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 
 set_target_properties( minhook
     PROPERTIES

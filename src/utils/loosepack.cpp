@@ -43,6 +43,10 @@ namespace
 	constexpr uint32_t kRsc7Magic = 0x37435352; // "RSC7"
 	constexpr uint32_t kOpenTag = 0x4E45504F;   // "OPEN"
 	constexpr uint32_t kSector = 512;
+	// Whole-archive granularity. Payload offsets are counted in 512-byte
+	// blocks, but every archive shipped with the game has a size that is also a
+	// multiple of 2048, and the engine depends on that.
+	constexpr uint32_t kArchiveSector = 2048;
 	constexpr uint32_t kDirEntrySize = 16;
 	constexpr uint32_t kMaxNameTable = 0x10000; // name offsets are 16-bit
 	constexpr uint32_t kMaxField24 = 0xFFFFFF;
@@ -408,6 +412,14 @@ namespace
 				return false;
 		}
 
+		// Retail archives are always a multiple of the 2048-byte sector size,
+		// and the engine relies on that when it builds the entry table: a
+		// misaligned file parses as an archive with no entries, and the first
+		// lookup inside it faults. Trailing zeros are outside every payload, so
+		// padding is inert.
+		while (out.size() % kArchiveSector != 0)
+			out.push_back(0);
+
 		return true;
 	}
 }
@@ -533,5 +545,54 @@ namespace loosepack
 		}
 
 		return relative;
+	}
+
+	bool BuildTo(const fs::path& dir, const fs::path& outFile, std::string& error)
+	{
+		std::error_code ec;
+		if (!fs::is_directory(dir, ec))
+		{
+			error = dir.string() + " is not a directory";
+			return false;
+		}
+
+		std::vector<uint8_t> bytes;
+		std::string buildError;
+		if (!build_archive(dir, bytes, buildError))
+		{
+			error = buildError;
+			return false;
+		}
+
+		fs::create_directories(outFile.parent_path(), ec);
+
+		const fs::path tmp = outFile.string() + ".tmp";
+		{
+			std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+			if (!out)
+			{
+				error = "cannot write " + tmp.string();
+				return false;
+			}
+			out.write(reinterpret_cast<const char*>(bytes.data()),
+				static_cast<std::streamsize>(bytes.size()));
+			if (!out)
+			{
+				error = "short write on " + tmp.string();
+				return false;
+			}
+		}
+
+		fs::remove(outFile, ec);
+		ec.clear();
+		fs::rename(tmp, outFile, ec);
+		if (ec)
+		{
+			fs::remove(tmp, ec);
+			error = "cannot publish " + outFile.string();
+			return false;
+		}
+
+		return true;
 	}
 }

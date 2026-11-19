@@ -6,6 +6,7 @@
 #include <ws2tcpip.h>
 
 #include "config.h"
+#include "shutdown.h"
 
 #include <algorithm>
 #include <atomic>
@@ -126,6 +127,13 @@ namespace
 		const std::string hello =
 			std::string("ZEROIV-LOADER/1 ZeroIV.asi ") + ZEROIV_LOADER_VERSION + "\n";
 
+		// Wakes up in slices so a shutdown is noticed promptly instead of after a
+		// full reconnect delay.
+		auto pause = [](int millis) {
+			for (int slept = 0; slept < millis && !exitguard::stopping(); slept += 100)
+				std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		};
+
 		SOCKET sock = INVALID_SOCKET;
 		auto ensure_connected = [&]() -> bool
 		{
@@ -143,7 +151,10 @@ namespace
 			return true;
 		};
 
-		for (;;)
+		// Runs until the process starts exiting. A detached thread cannot keep the
+		// process alive, but leaving it parked on a socket during teardown only
+		// adds a way for the shutdown to stall.
+		while (!exitguard::stopping())
 		{
 			std::string line;
 			{
@@ -167,7 +178,7 @@ namespace
 					if (g_queue.size() < kMaxQueuedLines)
 						g_queue.push_front(std::move(line));
 				}
-				std::this_thread::sleep_for(std::chrono::milliseconds(kReconnectDelayMs));
+				pause(kReconnectDelayMs);
 				continue;
 			}
 
@@ -181,9 +192,13 @@ namespace
 				std::lock_guard<std::mutex> lock(g_queueMutex);
 				if (g_queue.size() < kMaxQueuedLines)
 					g_queue.push_front(std::move(line));
-				std::this_thread::sleep_for(std::chrono::milliseconds(kReconnectDelayMs));
+				pause(kReconnectDelayMs);
 			}
 		}
+
+		if (sock != INVALID_SOCKET)
+			closesocket(sock);
+		WSACleanup();
 	}
 }
 
@@ -278,3 +293,4 @@ void logbridge::enqueue(const char* type, const char* message)
 
 	ensure_started();
 }
+

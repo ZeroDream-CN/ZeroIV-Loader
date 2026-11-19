@@ -400,6 +400,12 @@ void logger::flush()
         g_file.flush();
 }
 
+void logger::flush_nolock()
+{
+	if (g_file.is_open())
+		g_file.flush();
+}
+
 void logger::console_attached()
 {
 	// Called after AllocConsole(). Any probe made before that saw the inherited

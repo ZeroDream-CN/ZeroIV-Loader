@@ -650,6 +650,11 @@ device = false
 enabled = true
 host = 127.0.0.1
 port = 27183
+
+[ui]
+; Language of the loader's own prompts. auto follows the Windows UI language;
+; en and zh force English or Chinese.
+language = auto
 '@
     Set-Content -Path $ini -Value $content -Encoding UTF8
     Write-Step "wrote default $ini"

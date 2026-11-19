@@ -5,3 +5,12 @@ ZeroIV.ini
 ZeroIV.log
 RageOpenV.ini
 RageOpenV.log
+scratch/*.exe
+scratch/*.obj
+scratch/*.res
+scratch/obj/
+scratch/exithang/
+scratch/threadprobe/
+
+src/resources/ngdata.bin
+src/resources/ngdata.rcinc

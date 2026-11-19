@@ -1,0 +1,15 @@
+#include <windows.h>
+
+// NG key material for the RPF7 cipher: a 256-byte lookup, the round keys and
+// the round tables, laid out as ngcrypt.cpp expects.
+//
+// Not tracked. It is Rockstar's, taken from the retail game, so it does not
+// belong in a public repository; see docs/ng-keys.md. The build writes
+// ngdata.rcinc next to this file, emitting the resource only when a local
+// ngdata.bin exists -- without one the cipher reports itself unavailable and
+// every entry point fails cleanly instead of the build breaking.
+#include "ngdata.rcinc"
+
+// Stock vehicle layout names, used to validate a generated pack's <layout>
+// references; see utils/dlcgen.cpp.
+STOCKLAYOUTS RCDATA "stocklayouts.txt"

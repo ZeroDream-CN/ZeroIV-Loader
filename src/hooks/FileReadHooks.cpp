@@ -1,4 +1,5 @@
 #include "main.h"
+#include "FileReadHooks.h"
 #include <cctype>
 #include <cstring>
 #include <mutex>
@@ -104,9 +105,24 @@ static bool TryOverlayPath(const char* path, std::string& outPath)
     static const std::string kUpdateX64 = "update/x64/";
     if (lowered.compare(0, kUpdateX64.size(), kUpdateX64) == 0)
     {
-        const std::string candidate = config::device_path(config::unpack_root(), path + kUpdateX64.size());
-        if (GetFileAttributesA(candidate.c_str()) != INVALID_FILE_ATTRIBUTES)
-            result = candidate;
+        const std::string rest = path + kUpdateX64.size();
+
+        // Two layers are checked: the hidden .cache one holds what the loader
+        // generates, the plain one holds packs placed by hand. Generated wins
+        // because it is rebuilt from source, so it cannot be the stale copy.
+        const std::filesystem::path layers[] = {
+            config::generated_root(),
+            config::unpack_root(),
+        };
+        for (const auto& layer : layers)
+        {
+            const std::string candidate = config::device_path(layer, rest);
+            if (GetFileAttributesA(candidate.c_str()) != INVALID_FILE_ATTRIBUTES)
+            {
+                result = candidate;
+                break;
+            }
+        }
     }
 
     {
@@ -138,6 +154,12 @@ static bool ResolveRedirect(const char* path, std::string& out, const char*& sou
         return true;
     }
     return false;
+}
+
+bool fileread::ResolvePhysical(const char* path, std::string& out)
+{
+    const char* source = nullptr;
+    return ResolveRedirect(path, out, source);
 }
 
 // Which spelling of a mods/ name this game's file device actually opens.

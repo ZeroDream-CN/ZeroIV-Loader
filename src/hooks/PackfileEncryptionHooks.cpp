@@ -55,7 +55,6 @@ bool ParseHeaderHook(rage::fiPackfile* a1, const char* name, bool readHeader, vo
 		// the resources read out of it are garbage.
 		const bool openByArchive = a1->encryptionMagic == OPEN;
 		const bool openByGlobal = currentEncryption == OPEN;
-
 		// A bogus count would walk off the entry table and corrupt the heap.
 		const int count = a1->filesCount;
 		const bool sane = count >= 0 && count <= 1000000 && a1->entryTable != nullptr;
@@ -66,20 +65,26 @@ bool ParseHeaderHook(rage::fiPackfile* a1, const char* name, bool readHeader, vo
 			return ret;
 		}
 
-		const bool open = openByArchive || openByGlobal;
 		int patched = 0;
 
-		// Whether an add-on pack was accepted is reported by OpenArchiveHook,
-		// which sees every archive name including the ones under mods/. This
-		// hook does not: the engine reaches a modded packfile through the local
-		// device and never passes its name here, so a check on it would only
-		// ever match a stock archive.
-
-		// GTA V parses an OPEN (unencrypted) RPF7 by itself, so poking the entry
-		// table is only needed on builds that reject them. The switch lets that
-		// be ruled out without a rebuild when a mod archive misbehaves.
-		static const bool allowPatching = config::get_value<bool>("config", "allowUnencryptedRpf", true);
-		if (open && allowPatching)
+		// GTA V parses an OPEN (unencrypted) RPF7 by itself, so this loop is a
+		// workaround for builds that reject one -- and it is off by default
+		// because it is actively dangerous. 0xFEFFFFF is the sentinel the engine
+		// reads as "plaintext", so stamping it onto an entry whose payload is
+		// still ciphertext turns that file into garbage the moment it is read.
+		//
+		// mods/update/update.rpf is exactly that shape: converting the table of
+		// contents to OPEN rewrites the header and the TOC only, while the
+		// payloads -- including every map district .ymt and the vehicle metadata
+		// -- stay NG-encrypted and keep their per-entry flag. Clearing those
+		// flags took out the whole world map and every add-on vehicle at once.
+		//
+		// The stale-global test that used to arm this was wrong in the same way:
+		// a mod pack parsed on another thread leaves currentEncryption on OPEN,
+		// which says nothing about the archive being parsed now.
+		static const bool allowPatching =
+			config::get_value<bool>("config", "allowUnencryptedRpf", false);
+		if (openByArchive && allowPatching)
 		{
 			for (int i = 0; i < count; ++i)
 			{
@@ -96,12 +101,12 @@ bool ParseHeaderHook(rage::fiPackfile* a1, const char* name, bool readHeader, vo
 
 		// Unencrypted archives are rare (only the mod packs), so this stays
 		// always-on: it is the line that tells whether a mod archive was
-		// actually accepted. The fallback marker flags the cross-thread case.
-		if (openByArchive || patched > 0)
+		// actually accepted. A stale global is reported, never acted on.
+		if (openByArchive || openByGlobal)
 		{
 			logger::write("mods", "[%s] unencrypted archive /%s: %d entries, patched %d%s%s",
 				__FUNCTION__, name, count, patched,
-				openByArchive ? "" : " (stale global, no per-archive marker)",
+				openByArchive ? "" : " (stale global, ignored)",
 				allowPatching ? "" : " (patching disabled by config)");
 		}
 	}

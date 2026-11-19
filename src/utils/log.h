@@ -16,8 +16,13 @@ namespace logger
 	// call on every hot-path log so over-budget lines are dropped before they
 	// are formatted.
 	bool allow_line(const char* type);
-	// Flushes the buffered log file (called on detach).
+	// Flushes the buffered log file (called on detach). Takes the log lock, so it
+	// is unsafe under the loader lock during a process exit.
 	void flush();
+	// Flushes without taking the lock. Only valid once every other thread is gone,
+	// i.e. from DllMain(DLL_PROCESS_DETACH) while the process is exiting, where
+	// taking the lock could block forever on a mutex a terminated thread owned.
+	void flush_nolock();
 	// Re-probes the console handle. Call after AllocConsole().
 	void console_attached();
 }

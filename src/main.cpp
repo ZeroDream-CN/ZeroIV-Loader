@@ -11,6 +11,8 @@
 #endif
 
 #include "utils/forensics.h"
+#include "utils/fivem.h"
+#include "utils/shutdown.h"
 #include "hooks/BindDescriptorHooks.h"
 
 static bool bInited = false;
@@ -52,6 +54,15 @@ void HookGetSystemTimeAsFileTime(LPFILETIME lpSystemTimeAsFileTime)
 		bindhooks::install();
 
 		memory::InitFuncs::run();
+
+		// Armed before anything can exit, so a shutdown that hangs is cut short
+		// instead of leaving the process behind.
+		exitguard::install();
+
+		// FiveM resources are turned into DLC archives here, before the engine
+		// opens update.rpf and walks dlclist.xml. Doing it later than this is
+		// useless: the pack list has already been read by then.
+		fivem::Init();
 
 		// Version plus commit: the line that ties a crashing binary back to the
 		// exact sources it was built from.
@@ -150,8 +161,20 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  dwReason, LPVOID lpReserved)
 	}
 	else if (dwReason == DLL_PROCESS_DETACH)
 	{
-		// Detach can run under the loader lock; only flush buffers here.
-		logger::flush();
+		// lpReserved is non-null only when the whole process is exiting. In that
+		// case every other thread is already gone and the loader lock is held, so
+		// this must not block on anything: a mutex that a terminated thread still
+		// owned would never be released, and the process would never finish dying.
+		// The marker is raw Win32 for that reason.
+		const bool processExiting = lpReserved != nullptr;
+		exitguard::trace(processExiting ? "detach: process exiting" : "detach: FreeLibrary");
+
+		// Safe without the lock: during a process exit no other thread can be
+		// inside the stream. A FreeLibrary detach keeps the normal locked path.
+		if (processExiting)
+			logger::flush_nolock();
+		else
+			logger::flush();
 	}
 	return TRUE;
 }

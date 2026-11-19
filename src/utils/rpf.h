@@ -16,17 +16,17 @@ struct BinaryEntry
 	uint32_t realSize;
 	uint32_t isEncrypted;
 
-	uint32_t GetFileSize()
+	uint32_t GetFileSize() const
 	{
 		return fileSize[0] + (fileSize[1] << 8) + (fileSize[2] << 16);
 	}
 
-	uint32_t GetFileOffset()
+	uint32_t GetFileOffset() const
 	{
 		return fileOffset[0] + (fileOffset[1] << 8) + (fileOffset[2] << 16);
 	}
 
-	bool IsCompressed()
+	bool IsCompressed() const
 	{
 		return GetFileSize() != 0;
 	}
@@ -60,17 +60,17 @@ struct Entry
 		ResourceEntry res;
 	};
 
-	bool IsDirectory()
+	bool IsDirectory() const
 	{
 		return dir.entryType == 0x7FFFFF00;
 	}
 
-	bool IsBinary()
+	bool IsBinary() const
 	{
 		return !IsDirectory() && (dir.entryType & 0x80000000) == 0L;
 	}
 
-	bool IsResource()
+	bool IsResource() const
 	{
 		return !IsDirectory() && !IsBinary();
 	}

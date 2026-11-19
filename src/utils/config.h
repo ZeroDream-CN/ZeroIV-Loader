@@ -67,8 +67,10 @@ public:
 		bool added = false;
 		add_default<bool>("config", "console", false, added);
 		add_default<bool>("config", "modsOverride", true, added);
-		add_default<bool>("config", "allowUnencryptedRpf", true, added);
+		add_default<bool>("config", "allowUnencryptedRpf", false, added);
 		add_default<bool>("config", "dumpImage", false, added);
+		add_default<bool>("fivem", "enabled", true, added);
+		add_default<bool>("fivem", "patchStockUpdateRpf", false, added);
 		add_default<bool>("log", "info", false, added);
 		add_default<bool>("log", "mods", false, added);
 		add_default<bool>("log", "rpf", false, added);
@@ -78,6 +80,7 @@ public:
 		add_default<int>("debugConsole", "port", 27183, added);
 		add_default<std::string>("paths", "mods", "", added);
 		add_default<std::string>("paths", "unpackMods", "", added);
+		add_default<std::string>("ui", "language", "auto", added);
 		if (added)
 			save();
 
@@ -134,6 +137,17 @@ public:
 	static const std::filesystem::path& cache_root()
 	{
 		static const std::filesystem::path root = std::filesystem::current_path() / "ZeroIVLoose";
+		return root;
+	}
+
+	// Hidden layer for archives the loader generates itself (FiveM resources).
+	// It mirrors the unpack tree one level down, so `dlcpacks:/<pack>/dlc.rpf`
+	// resolves to `.cache/dlcpacks/<pack>/dlc.rpf`. Keeping it dot-named and
+	// hidden leaves unpack-mods/ showing only content the user placed there,
+	// which matters because that folder doubles as the FiveM resource list.
+	static const std::filesystem::path& generated_root()
+	{
+		static const std::filesystem::path root = unpack_root() / ".cache";
 		return root;
 	}
 
