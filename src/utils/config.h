@@ -33,14 +33,31 @@ public:
 
 		if (std::filesystem::exists(kIniPath))
 		{
+			// The parser only knows '#' by default, while every ini written for
+			// this project (and every hand-edited one) uses ';'. Accepting both
+			// keeps a commented file readable instead of rejecting it whole.
+			get_ini().setCommentPrefixes({ "#", ";" });
+
 			try
 			{
 				get_ini().load(kIniPath);
 			}
-			catch (...)
+			catch (const std::exception& e)
 			{
 				// A hand-edited file with a syntax error must not take the game
-				// down; fall back to defaults and rewrite it below.
+				// down. Keep the original next to it so nothing typed by hand is
+				// lost when the defaults are written below.
+				load_error() = e.what();
+
+				std::error_code ec;
+				std::filesystem::copy_file(kIniPath, "ZeroIV.ini.broken",
+					std::filesystem::copy_options::overwrite_existing, ec);
+
+				get_ini().clear();
+			}
+			catch (...)
+			{
+				load_error() = "unknown parser error";
 				get_ini().clear();
 			}
 		}
@@ -81,6 +98,14 @@ public:
 	static bool get_log(const char* key)
 	{
 		return log_enabled(key);
+	}
+
+	// Reason the ini could not be parsed, empty when it loaded. The logger is
+	// not initialised yet while load() runs, so main.cpp reports this once the
+	// log is open.
+	static const std::string& error()
+	{
+		return load_error();
 	}
 
 	// Storage root of one mod layer.
@@ -172,6 +197,12 @@ public:
 	}
 
 private:
+	static std::string& load_error()
+	{
+		static std::string message;
+		return message;
+	}
+
 	// Resolves one `[paths]` entry. The configured value may be absolute, or
 	// relative to the working directory; empty falls back to `fallback` in the
 	// working directory.
@@ -182,14 +213,38 @@ private:
 			configured = fallback;
 
 		std::filesystem::path root(configured);
-		if (root.is_relative())
-			root = std::filesystem::current_path() / root;
 
+		// A path written the way the user sees it in their file manager starts
+		// with a slash. Wine resolves such a path against the Unix filesystem,
+		// but the drive-letter form is what the rest of the loader (and the
+		// engine's own file devices) handle consistently, and Proton always maps
+		// Z: to /. The literal form is kept when that mapping does not exist.
+		if (configured[0] == '/' || configured[0] == '\\')
+		{
+			const std::filesystem::path viaRoot("Z:" + configured);
+			if (is_directory(viaRoot))
+				return normalize(viaRoot);
+		}
+
+		if (root.is_relative())
+			return normalize(std::filesystem::current_path() / root);
+
+		return normalize(root);
+	}
+
+	static bool is_directory(const std::filesystem::path& path)
+	{
 		std::error_code ec;
-		const std::filesystem::path canon = std::filesystem::weakly_canonical(root, ec);
+		return std::filesystem::is_directory(path, ec);
+	}
+
+	static std::filesystem::path normalize(const std::filesystem::path& path)
+	{
+		std::error_code ec;
+		const std::filesystem::path canon = std::filesystem::weakly_canonical(path, ec);
 		if (!ec)
 			return canon;
-		return std::filesystem::absolute(root, ec);
+		return std::filesystem::absolute(path, ec);
 	}
 
 	struct Switches

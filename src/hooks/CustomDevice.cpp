@@ -234,7 +234,8 @@ char OpenArchiveHook(rage::fiPackfile* a1, const char* path, char smth, int32_t 
 	// or because it never read it at all.
 	const char result = OpenArchiveOrig(a1, usePath, smth, type, a5);
 	if (built.empty())
-		logger::log("device", "[%s] Opening archive %s %d %d", __FUNCTION__, usePath, (int)smth, (int)type);
+		logger::log("device", "[%s] Opening archive %s %d %d -> %d", __FUNCTION__, usePath,
+			(int)smth, (int)type, (int)result);
 	else
 		logger::write("pack", "[%s] mounted %s -> %d", __FUNCTION__, usePath, (int)result);
 	return result;

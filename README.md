@@ -47,8 +47,7 @@ folder changes.
 ### Storage locations
 
 Both folders live next to the executable by default. Point them anywhere with
-the `[paths]` section of `ZeroIV.ini` — absolute paths are used as given, and
-relative ones resolve against the game directory:
+the `[paths]` section of `ZeroIV.ini`:
 
 ```ini
 [paths]
@@ -59,6 +58,26 @@ unpackMods = unpack-mods
 ; mods = D:/GTAV-Mods/mods
 ; unpackMods = ../shared/unpack-mods
 ```
+
+- An absolute path is used as given. Both `D:\GTAV-Mods\mods` and
+  `D:/GTAV-Mods/mods` work.
+- A relative path resolves against the game directory. It cannot climb above
+  the drive root, so under Proton `..\..\..\..\..\..\` stops at the drive the
+  Steam library is on; use an absolute path to reach another disk.
+- Running under Proton/Wine, a Unix path such as `/home/you/gta-mods/mods` is
+  accepted too and is translated through the `Z:` drive, which Wine maps to the
+  filesystem root.
+- `;` and `#` both start a comment. If the file cannot be parsed, the loader
+  keeps a copy as `ZeroIV.ini.broken`, logs the parser message and runs with
+  defaults instead of silently ignoring the settings.
+
+The resolved roots are printed at every launch:
+
+```
+attach: mods root   Z:\home\you\gta-mods\mods
+attach: unpack root Z:\home\you\gta-mods\unpack-mods
+```
+
 
 ## Debug console integration
 

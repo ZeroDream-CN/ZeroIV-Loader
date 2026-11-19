@@ -73,6 +73,16 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  dwReason, LPVOID lpReserved)
 			(int)config::get_config<bool>("console"),
 			(int)config::get_value<bool>("config", "modsOverride", true));
 
+		// Resolved once here so a mistyped [paths] entry shows up as one clear
+		// line instead of a pack that silently never loads.
+		if (!config::error().empty())
+			logger::write("info", "attach: ZeroIV.ini could not be read (%s); "
+				"defaults were used and the original was kept as ZeroIV.ini.broken",
+				config::error().c_str());
+
+		logger::write("info", "attach: mods root %s", config::mods_root().string().c_str());
+		logger::write("info", "attach: unpack root %s", config::unpack_root().string().c_str());
+
 		memory::init();
 
 		logger::write("info", "attach: memory initialised");
