@@ -133,6 +133,16 @@ SOFTWARE.
 3. Upstream lineage
 --------------------------------------------------------------------------------
 
-ZeroIV-Loader descends from ClosedIV by martonp96 and its GTA V Legacy /
-Enhanced fork by Chiheb-Bacha. Their copyright notices apply to the portions
-that originate there; see the project history and README credits.
+ZeroIV-Loader descends from ClosedIV, and from RageOpenV, the GTA V Legacy /
+Enhanced fork of it. The RageOpenV tree this project was based on is published
+by Chiheb-Bacha under the GNU General Public License, version 3:
+
+    https://github.com/Chiheb-Bacha/RageOpenV  (GPL-3.0)
+
+The history of that fork is preserved verbatim in this repository, including
+the earlier commits by the original ClosedIV authors, so the provenance and the
+licence of every inherited file stay traceable even though the original
+ClosedIV repository is no longer reachable.
+
+Copyright in the inherited portions remains with those authors. Copyright in
+the ZeroIV-Loader changes is held by their respective contributors.
