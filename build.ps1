@@ -42,7 +42,7 @@
     ZEROIV_PROXY / https_proxy / all_proxy, then probes the usual local ports.
 
 .PARAMETER MinHook
-    Use an existing MinHook checkout instead of the submodule/download. A
+    Use an existing MinHook checkout instead of the vendored copy/download. A
     directory junction is created at src\vendor\minhook if needed.
 
 .PARAMETER NoIni
@@ -453,30 +453,6 @@ function Get-NetworkProxy {
     return $null
 }
 
-# git wrapper: bounded remote operations and no interactive credential prompts.
-function Invoke-Git {
-    param([string[]]$Arguments)
-
-    $git = Get-Command git.exe -ErrorAction SilentlyContinue
-    if (-not $git) { return $false }
-
-    $gitArgs = @('-c', 'http.lowSpeedLimit=1000', '-c', 'http.lowSpeedTime=120')
-    $proxyUrl = Get-NetworkProxy
-    if ($proxyUrl) {
-        $gitArgs += @('-c', "http.proxy=$proxyUrl", '-c', "https.proxy=$proxyUrl")
-    }
-    $gitArgs += $Arguments
-
-    $previous = $env:GIT_TERMINAL_PROMPT
-    $env:GIT_TERMINAL_PROMPT = '0'
-    try {
-        & $git.Source @gitArgs
-        return ($LASTEXITCODE -eq 0)
-    } finally {
-        $env:GIT_TERMINAL_PROMPT = $previous
-    }
-}
-
 function Get-RemoteFile {
     param([string]$Url, [string]$Destination)
 
@@ -508,8 +484,10 @@ function Get-RemoteFile {
     }
 }
 
-# Makes src\vendor\minhook usable: an initialized submodule, a -MinHook junction,
-# or the pinned upstream tarball when the submodule remote cannot be reached.
+# Makes src\vendor\minhook usable. The sources are committed with the project,
+# so the normal path is the vendored copy; a -MinHook junction and the pinned
+# upstream tarball remain as fallbacks for a tree where the vendor directory was
+# stripped.
 function Initialize-MinHook {
     $header = Join-Path $MinHookPath 'include\MinHook.h'
     if (Test-Path $header) {
@@ -545,25 +523,13 @@ Remove it, or point the build at a local checkout with -MinHook <dir>.
         Remove-Item $MinHookPath -Force
     }
 
-    if (Get-Command git.exe -ErrorAction SilentlyContinue) {
-        Write-Step 'MinHook: fetching the submodule'
-        if (Invoke-Git @('submodule', 'update', '--init', '--depth', '1', 'src/vendor/minhook')) {
-            if (Test-Path $header) {
-                Write-Step 'MinHook: submodule'
-                return
-            }
-        }
-        Write-Warn 'submodule update failed; downloading the pinned upstream sources'
-    }
-
     $stage = Join-Path $BuildDir 'minhook-stage'
     $archive = Join-Path $BuildDir 'minhook.tar.gz'
     $tar = Get-Command tar.exe -ErrorAction SilentlyContinue
     if (-not $tar) {
         Fail @'
 MinHook sources are missing and tar.exe is unavailable (Windows 10 1803+ ships it).
-Run: git submodule update --init --recursive
-or:  .\build.ps1 -MinHook <path-to-minhook>
+Pass a checkout: .\build.ps1 -MinHook <path-to-minhook>
 '@
     }
 
@@ -577,7 +543,6 @@ or:  .\build.ps1 -MinHook <path-to-minhook>
 could not download MinHook.
 Behind a proxy? pass -Proxy http://127.0.0.1:7897 (or set ZEROIV_PROXY).
 Already have the sources? pass -MinHook <path-to-minhook>
-Or run: git submodule update --init --recursive
 '@
     }
 
@@ -760,6 +725,11 @@ if (-not $NoIni) {
     Write-DefaultIni $outputDir
 }
 
+# MinHook and inipp require their notice to accompany binary distributions and
+# the GPL needs its text, so both files land next to the binary.
+Copy-Item (Join-Path $Root 'LICENSE.txt') $outputDir -Force
+Copy-Item (Join-Path $Root 'THIRD-PARTY-NOTICES.txt') $outputDir -Force
+
 $sizeMb = [math]::Round((Get-Item $binary).Length / 1MB, 2)
 Write-Step "built $binary ($sizeMb MB)"
 Show-Imports $binary
@@ -767,7 +737,8 @@ Show-Imports $binary
 Write-Host @'
 
 Next steps:
-  - Copy ZeroIV.asi (and ZeroIV.ini, optional) into the GTA V folder.
+  - Copy ZeroIV.asi (with ZeroIV.ini, LICENSE.txt and THIRD-PARTY-NOTICES.txt)
+    into the GTA V folder.
   - Start ZeroIV and open its Debug Console to watch the
     loader's log live; the same lines go to ZeroIV.log next to the ASI.
 '@

@@ -1,6 +1,29 @@
 cmake_minimum_required(VERSION 3.17)
 
-project(ZeroIV-Loader VERSION 1.0.0 LANGUAGES CXX)
+# VERSION is the single source of truth for the release number: the tag, the
+# binary and the source archive all read it, so a build can always be traced
+# back to the exact sources it came from.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" ZEROIV_VERSION)
+string(STRIP "${ZEROIV_VERSION}" ZEROIV_VERSION)
+
+project(ZeroIV-Loader VERSION ${ZEROIV_VERSION} LANGUAGES CXX)
+
+# The commit is recorded when building inside a git checkout and is empty when
+# building from a source archive, where it would only repeat the tag anyway.
+set(ZEROIV_COMMIT "")
+find_package(Git QUIET)
+if(GIT_FOUND)
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" rev-parse --short=8 HEAD
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        OUTPUT_VARIABLE ZEROIV_COMMIT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE ZEROIV_COMMIT_RESULT)
+    if(NOT ZEROIV_COMMIT_RESULT EQUAL 0)
+        set(ZEROIV_COMMIT "")
+    endif()
+endif()
 
 file(GLOB_RECURSE PROJECT_SOURCE_FILES "src/*.h" "src/*.cpp")
 
@@ -38,7 +61,9 @@ set_target_properties(ZeroIVLoader PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/BIN/Release/"
 )
 
-target_compile_definitions(ZeroIVLoader PRIVATE ZEROIV_LOADER_VERSION="${PROJECT_VERSION}")
+target_compile_definitions(ZeroIVLoader PRIVATE
+    ZEROIV_LOADER_VERSION="${PROJECT_VERSION}"
+    ZEROIV_LOADER_COMMIT="${ZEROIV_COMMIT}")
 
 set_target_properties( minhook
     PROPERTIES

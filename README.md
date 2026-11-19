@@ -23,6 +23,8 @@ GTA V Enhanced, and it feeds its log into ZeroIV's debug console in real time.
 | `ZeroIV.asi` | The loader itself (build output). |
 | `ZeroIV.ini` | Runtime configuration. Created next to `ZeroIV.asi` on first launch. An existing `RageOpenV.ini` is migrated automatically. |
 | `ZeroIV.log` | Session log, rewritten at every launch. |
+| `LICENSE.txt` | GPL-3.0-or-later. Must stay next to the binary. |
+| `THIRD-PARTY-NOTICES.txt` | Licences of the bundled libraries. Must stay next to the binary. |
 
 ## Mods layouts
 
@@ -157,6 +159,12 @@ CMake 3.17.x and Visual Studio are needed to build on Windows. Run
 project files for a specific VS version. The binary is produced as
 `BUILD/BIN/Release/ZeroIV.asi`.
 
+No submodule checkout or network access is required: MinHook is vendored under
+`src/vendor/minhook`. The version number comes from the `VERSION` file, which
+is what release tags must match; building inside a git checkout additionally
+records the commit.
+
+
 ### Building on Windows with PowerShell
 
 `build.ps1` drives the same CMake build and needs only Visual Studio (with the
@@ -179,12 +187,11 @@ access), `-MinHook DIR` (use a local checkout), `-NoIni`. A default
 `ZeroIV.ini` is written next to the binary and never overwrites an existing
 one.
 
-When `src/vendor/minhook` is not initialized, the script runs `git submodule
-update`; if that fails it downloads the pinned MinHook revision itself, so a
-fresh clone builds without network access to the submodule remote. Behind a
-proxy, pass `-Proxy http://127.0.0.1:7897` or set `ZEROIV_PROXY`; without a
-flag the usual local proxy ports are probed once the network is actually
-needed. If the execution policy blocks the script, run
+MinHook is vendored under `src/vendor/minhook`, so a fresh clone builds without
+any network access. The pinned upstream revision is still downloaded as a
+fallback if that directory is missing. Behind a proxy, pass
+`-Proxy http://127.0.0.1:7897` or set `ZEROIV_PROXY`; without a flag the usual
+local proxy ports are probed once the network is actually needed. If the execution policy blocks the script, run
 `powershell -ExecutionPolicy Bypass -File .\build.ps1`.
 
 ### Cross-compiling on Linux
@@ -217,9 +224,8 @@ gain.
 
 Notes:
 
-- MinHook comes from the `src/vendor/minhook` submodule. When it is not
-  initialised the script fetches the pinned revision itself, so a fresh clone
-  builds without `git submodule update`.
+- MinHook is vendored in `src/vendor/minhook` (upstream commit `4a45552`), so
+  a fresh clone or a source archive builds without network access.
 - MinGW links the GCC runtimes statically (`libstdc++`, `libgcc`,
   `libwinpthread`), so the ASI only needs `KERNEL32.dll`, `msvcrt.dll` and
   `WS2_32.dll` — nothing has to be shipped beside it.
@@ -243,9 +249,13 @@ Notes:
 ## How to install
 
 - Install an ASI loader.
-- Put `ZeroIV.asi` in your GTA V folder.
+- Put `ZeroIV.asi` in your GTA V folder, together with `LICENSE.txt` and
+  `THIRD-PARTY-NOTICES.txt` (required when you redistribute it).
 - Delete `OpenIV.asi` or `OpenRPF.asi` if you have it.
-- Place your mods in your mods folder, or keep the ones you already had.
+- Put your mods in `mods/` and `unpack-mods/`, or point `[paths]` in
+  `ZeroIV.ini` at wherever they already live.
+- A `dlc.rpf` may be a real archive or an unpacked folder; folders are compiled
+  into an archive under `ZeroIVLoose/` on first launch.
 
 ## Info
 
@@ -258,5 +268,39 @@ latest projects? Join the [Discord](https://discord.gg/VMvvuFxArY)!
 
 ## LICENSE
 
-Please **DO NOT REDISTRIBUTE** built binaries, and instead link to the
-[official release](https://www.gta5-mods.com/scripts/rageopenv).
+ZeroIV-Loader is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See [LICENSE.txt](LICENSE.txt) for the full text.
+
+Because the GPL covers the program as a whole, there are no restrictions beyond
+it: you may redistribute the binary, bundle it with an installer, or ship it in
+a launcher (the ZeroIV app does the latter) as long as the corresponding source
+travels with it. Redistribution is expressly permitted — that clause that used
+to forbid it no longer applies.
+
+- **Source**: the repository is the corresponding source for every release.
+  Each tagged release also ships `ZeroIV-Loader-<version>-src.tar.gz`, which
+  builds offline: MinHook is vendored under `src/vendor/minhook`, so no
+  submodule or download step is needed.
+- **Version traceability**: `VERSION` is the single source of truth for the
+  release number, and the build records the commit. The startup log line
+  (`ZeroIV-Loader 1.0.0+abcdef12 inited`) ties a binary back to its tree.
+- **Binaries**: when distributing ZeroIV.asi, ship `LICENSE.txt` and
+  `THIRD-PARTY-NOTICES.txt` alongside it. MinHook (BSD-2-Clause) and inipp
+  (MIT) both require their notice to accompany binary distributions.
+
+### Third-party components
+
+| Component | Version | Licence |
+| --- | --- | --- |
+| [MinHook](https://github.com/TsudaKageyu/minhook) | `4a45552` | BSD-2-Clause |
+| [inipp](https://github.com/mcmtroffaes/inipp) | vendored header | MIT |
+
+Full texts are in [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt).
+
+### Not affiliated with Rockstar Games
+
+ZeroIV-Loader is an unofficial tool. It contains no game code, assets or keys,
+does not bypass any anti-cheat, and is intended for single-player use with a
+legitimately owned copy of GTA V. Use at your own risk.

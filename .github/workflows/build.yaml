@@ -1,49 +1,107 @@
 name: Build & deploy
 
+# Every push compiles the loader so a broken tree is caught immediately. A tag
+# additionally publishes a release: the binary, the licences the binary is
+# required to ship with, a checksum file, and the complete source archive that
+# corresponds to that binary.
+
 on:
   push:
-    branches-ignore: 
-      - '**'
-    tags:
-      - 'v*'
+    branches: [master, main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: cmd
 
 jobs:
-  x64_win32:
-    runs-on: windows-2019
-
-    defaults:
-      run:
-        shell: cmd
+  build:
+    runs-on: windows-2022
 
     steps:
-      - uses: microsoft/setup-msbuild@v1.0.2
-      - uses: actions/checkout@v2.2.0
+      - uses: actions/checkout@v4
         with:
-          submodules: 'recursive'
+          fetch-depth: 0
 
-      - name: Setup cmake
-        uses: jwlawson/actions-setup-cmake@v1.9
-        with:
-          cmake-version: '3.17.x'
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Check release tag matches VERSION
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          $tag = "${{ github.ref_name }}"
+          if ($tag -ne "v$version") {
+            throw "Tag $tag does not match VERSION ($version). Bump VERSION or retag."
+          }
+
+      - name: Configure
+        run: cmake -B BUILD .
 
       - name: Build Release
-        run: release.bat
+        run: cmake --build BUILD --config Release
 
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref }}
-          release_name: Release ${{ github.ref }}
+      - name: Assemble release files
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          $staging = 'dist'
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
 
-      - name: Upload ZeroIV.asi
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          Copy-Item 'BUILD/BIN/Release/ZeroIV.asi' $staging
+          Copy-Item 'LICENSE.txt' $staging
+          Copy-Item 'THIRD-PARTY-NOTICES.txt' $staging
+
+          # The corresponding source. Everything needed to rebuild is in the
+          # repository (MinHook is vendored), so a plain archive of the tagged
+          # tree is complete. It is committed as an asset because the archive
+          # the forge generates automatically ignores submodule-era trees and
+          # is not guaranteed to stay at a stable URL.
+          $prefix = "ZeroIV-Loader-$version/"
+          git archive --format=tar.gz --prefix=$prefix -o "$staging/ZeroIV-Loader-$version-src.tar.gz" HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'git archive failed' }
+
+          Get-ChildItem $staging -File |
+            Where-Object { $_.Name -ne 'SHA256SUMS.txt' } |
+            ForEach-Object {
+              $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+              "$hash  $($_.Name)"
+            } | Set-Content -Encoding ascii "$staging/SHA256SUMS.txt"
+
+          Get-ChildItem $staging -File | Select-Object Name, Length
+
+      - uses: actions/upload-artifact@v4
         with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: BUILD/BIN/Release/ZeroIV.asi
-          asset_name: ZeroIV.asi
-          asset_content_type: application/octet-stream
+          name: ZeroIV-Loader
+          path: dist/*
+
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+          body: |
+            **ZeroIV-Loader ${{ github.ref_name }}**
+
+            Download `ZeroIV.asi` and drop it next to `GTA5_Enhanced.exe`.
+
+            - `ZeroIV-Loader-*-src.tar.gz` — complete corresponding source for
+              this binary (GPL-3.0-or-later). Build with `scripts/build-cross-linux.sh`
+              or `build.ps1`.
+            - `SHA256SUMS.txt` — checksums for every file above.
+            - `LICENSE.txt`, `THIRD-PARTY-NOTICES.txt` — licence terms; keep them
+              next to the binary when redistributing.
+          files: |
+            dist/ZeroIV.asi
+            dist/LICENSE.txt
+            dist/THIRD-PARTY-NOTICES.txt
+            dist/ZeroIV-Loader-*-src.tar.gz
+            dist/SHA256SUMS.txt

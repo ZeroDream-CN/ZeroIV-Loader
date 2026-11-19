@@ -4,6 +4,12 @@
 #define ZEROIV_LOADER_VERSION "dev"
 #endif
 
+// Empty when the build came from a source archive, which is exactly the case
+// where the tag already identifies the tree.
+#ifndef ZEROIV_LOADER_COMMIT
+#define ZEROIV_LOADER_COMMIT ""
+#endif
+
 #include "utils/forensics.h"
 #include "hooks/BindDescriptorHooks.h"
 
@@ -47,8 +53,15 @@ void HookGetSystemTimeAsFileTime(LPFILETIME lpSystemTimeAsFileTime)
 
 		memory::InitFuncs::run();
 
-		logger::write("info", " ZeroIV-Loader %s inited (%s)", ZEROIV_LOADER_VERSION,
-			IsEnhanced() ? "GTA V Enhanced" : "GTA V Legacy");
+		// Version plus commit: the line that ties a crashing binary back to the
+		// exact sources it was built from.
+		const char* commit = ZEROIV_LOADER_COMMIT;
+		if (commit[0] != '\0')
+			logger::write("info", " ZeroIV-Loader %s+%s inited (%s)", ZEROIV_LOADER_VERSION,
+				commit, IsEnhanced() ? "GTA V Enhanced" : "GTA V Legacy");
+		else
+			logger::write("info", " ZeroIV-Loader %s inited (%s)", ZEROIV_LOADER_VERSION,
+				IsEnhanced() ? "GTA V Enhanced" : "GTA V Legacy");
 	}
 	origGetSystemTimeAsFileTime(lpSystemTimeAsFileTime);
 }

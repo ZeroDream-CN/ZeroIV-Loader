@@ -30,7 +30,7 @@
 #   BUILD_DIR       Build directory      (default BUILD/cross)
 #   ZEROIV_PROXY    Proxy URL (also reads https_proxy / HTTPS_PROXY / all_proxy)
 #   MINHOOK_DIR     Local MinHook checkout
-#   MINHOOK_COMMIT  MinHook revision fetched when the submodule is missing
+#   MINHOOK_COMMIT  MinHook revision fetched when the vendored copy is missing
 #   FETCH_TIMEOUT   Seconds allowed per download attempt (default 120)
 
 set -euo pipefail
@@ -219,7 +219,10 @@ git_fetch() {
 }
 
 # ---------------------------------------------------------------------------
-# MinHook: submodule > explicit checkout > submodule init > pinned tarball
+# MinHook: vendored copy > explicit checkout > pinned download
+#
+# The sources are committed under src/vendor/minhook so a release source
+# archive builds without network access or submodules.
 
 find_minhook() {
     local dir
@@ -239,24 +242,11 @@ else
     if [[ -n "$MINHOOK_LOCAL" ]]; then
         die "--minhook $MINHOOK_LOCAL does not contain include/MinHook.h"
     fi
-    SUBMODULE="$ROOT/src/vendor/minhook"
-    if [[ -d "$SUBMODULE" && -z "$(ls -A "$SUBMODULE" 2>/dev/null)" ]] && command -v git >/dev/null 2>&1; then
-        info "MinHook: fetching submodule"
-        if git_fetch submodule update --init --depth 1 src/vendor/minhook; then
-            if MINHOOK_DIR="$(find_minhook)"; then
-                info "MinHook: submodule"
-            fi
-        else
-            warn "git submodule update failed or timed out; falling back to a source download"
-        fi
-    fi
-
     if [[ -z "$MINHOOK_DIR" ]]; then
         MINHOOK_DIR="$BUILD_DIR/minhook-src"
         if [[ ! -f "$MINHOOK_DIR/include/MinHook.h" ]]; then
             command -v curl >/dev/null 2>&1 || die "MinHook sources missing and curl is unavailable.
-Run: git submodule update --init --recursive
-or:  $(basename "${BASH_SOURCE[0]}") --minhook /path/to/minhook"
+Pass a checkout: $(basename "${BASH_SOURCE[0]}") --minhook /path/to/minhook"
 
             info "MinHook: downloading $MINHOOK_COMMIT"
             STAGE="$BUILD_DIR/minhook-stage"
@@ -266,8 +256,7 @@ or:  $(basename "${BASH_SOURCE[0]}") --minhook /path/to/minhook"
                 rm -rf "$STAGE" "$BUILD_DIR/minhook.tar.gz"
                 die "could not download MinHook.
 Behind a proxy? pass --proxy http://127.0.0.1:7897 (or set ZEROIV_PROXY).
-Already have the sources? pass --minhook /path/to/minhook
-Or run: git submodule update --init --recursive"
+Already have the sources? pass --minhook /path/to/minhook"
             fi
             tar -xzf "$BUILD_DIR/minhook.tar.gz" -C "$STAGE" || die "could not extract MinHook"
             EXTRACTED="$(find "$STAGE" -mindepth 1 -maxdepth 1 -type d | head -n1)"
@@ -284,7 +273,14 @@ fi
 # ---------------------------------------------------------------------------
 # Flags
 
-DEFINES=(-DZEROIV_LOADER_VERSION="\"1.0.0\"")
+# VERSION is the single source of truth for the release number. The commit is
+# recorded too, so a binary can be traced back to the exact tree it was built
+# from even when the version has not been bumped yet.
+VERSION="$(tr -d '\r\n[:space:]' < "$ROOT/VERSION" 2>/dev/null)"
+[[ -n "$VERSION" ]] || die "cannot read $ROOT/VERSION"
+COMMIT="$(git -C "$ROOT" rev-parse --short=8 HEAD 2>/dev/null || true)"
+
+DEFINES=(-DZEROIV_LOADER_VERSION="\"$VERSION\"" -DZEROIV_LOADER_COMMIT="\"$COMMIT\"")
 ((ENABLE_LOGS)) && DEFINES+=(-D_LOG)
 # Keep asserts in debug builds; release matches the MSVC Release configuration.
 [[ "$MODE" == "release" ]] && DEFINES+=(-DNDEBUG)
@@ -496,6 +492,16 @@ enabled = true
 host = 127.0.0.1
 port = 27183
 EOF
+fi
+
+# The licences have to travel with the binary: MinHook and inipp both require
+# their notice to accompany binary distributions, and the GPL needs its text.
+cp -f "$ROOT/LICENSE.txt" "$DIST_DIR/LICENSE.txt"
+cp -f "$ROOT/THIRD-PARTY-NOTICES.txt" "$DIST_DIR/THIRD-PARTY-NOTICES.txt"
+
+if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$DIST_DIR" && sha256sum -b ZeroIV.asi LICENSE.txt THIRD-PARTY-NOTICES.txt \
+        > SHA256SUMS.txt) || rm -f "$DIST_DIR/SHA256SUMS.txt"
 fi
 
 info "built $OUTPUT ($(du -h "$OUTPUT" | cut -f1))"
