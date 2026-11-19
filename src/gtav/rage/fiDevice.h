@@ -81,6 +81,11 @@ namespace rage
 	class fiDeviceLocal : public fiDevice
 	{
 		char pad[0x120];
+		// Resolution root for this device. The engine hands a device the path it
+		// was looked up for (mount prefix included), so a device registered at
+		// "unpack-mods:/" must map "unpack-mods:/dlcpacks/x" to <root>/dlcpacks/x.
+		std::string rootPath;
+		std::string mountPrefix;
 	public:
 		fiDeviceLocal();
 		~fiDeviceLocal();
@@ -133,21 +138,12 @@ namespace rage
 
 		void ConvertFoundData(LPWIN32_FIND_DATAW foundDataWin, rage::fiFindData* foundDataRage);
 
-		static std::string ToFullPath(const char* fileName)
-		{
-			std::filesystem::path cwd = std::filesystem::current_path() / "newmods/";
+		// Physical directory every relative name is resolved against. Without it
+		// the device falls back to <cwd>/unpack-mods.
+		void SetRootPath(const std::string& path) { rootPath = path; }
+		// Mount point this device was registered under, e.g. "unpack-mods:/".
+		void SetMountPrefix(const std::string& prefix) { mountPrefix = prefix; }
 
-			std::string fName(fileName);
-
-			auto pos = fName.find(":/");
-			if (pos != std::string::npos)
-				fName.erase(pos, 1);
-
-			cwd /= fName;
-
-			cwd.make_preferred();
-
-			return cwd.string();
-		}
+		std::string ToFullPath(const char* fileName) const;
 	};
 }

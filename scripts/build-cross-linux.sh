@@ -461,10 +461,20 @@ if [[ ! -f "$INI" ]]; then
 [config]
 ; Opens a debug console window next to the game.
 console = false
-; Mounts the newmods/ override devices over platform:/common:/dlcpacks:.
-; Only directories that actually exist are mounted. Set to false to use the
-; stock devices and rely on plain mods/ redirection only.
+; Enables the unpack-mods/ layer. Set to false to use only mods/ redirection.
 modsOverride = true
+; Accepts RPF7 archives written without encryption (as ZeroIV builds them).
+allowUnencryptedRpf = true
+; Writes every image the engine mounts to an .img file for offline inspection.
+dumpImage = false
+
+[paths]
+; Where the two mod layers live. Empty or relative values resolve against the
+; game directory; absolute paths are used as given.
+;   mods/       per-file redirection, mirrors the game directory
+;   unpack-mods/ loose packs, carries only the subtrees it overrides
+mods = mods
+unpackMods = unpack-mods
 
 [log]
 ; Per-file-operation traces from the device/file hooks. They fire hundreds of

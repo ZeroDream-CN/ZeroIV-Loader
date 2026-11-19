@@ -1,6 +1,7 @@
 #include "main.h"
 
 #include <cstring>
+#include <cctype>
 #include <mutex>
 #include <unordered_map>
 
@@ -163,6 +164,38 @@ uint64_t rage::fiDeviceLocal::GetFileTime(const char* fileName)
 
 	logger::log("device", "[%s] %s %d", __FUNCTION__, fileName, filetime);
 	return filetime;
+}
+
+std::string rage::fiDeviceLocal::ToFullPath(const char* fileName) const
+{
+	std::string name = fileName ? fileName : "";
+
+	// A real Windows path needs no munging. The ':' test has to look at index 1
+	// only: a mount prefix carries its own colon much further in ("dlcpacks:/").
+	if (name.size() > 2 && name[1] == ':' && (name[2] == '\\' || name[2] == '/') &&
+		std::isalpha(static_cast<unsigned char>(name[0])))
+		return std::filesystem::path(name).make_preferred().string();
+
+	// The engine passes the path it resolved the device for, prefix included.
+	// Strip this device's own mount point first; any other mount prefix is
+	// dropped the same way the original implementation did (colon removed),
+	// leaving the name relative to the device root.
+	if (!mountPrefix.empty() && name.size() >= mountPrefix.size() &&
+		name.compare(0, mountPrefix.size(), mountPrefix) == 0)
+	{
+		name = name.substr(mountPrefix.size());
+	}
+	else if (auto pos = name.find(":/"); pos != std::string::npos)
+	{
+		name = name.substr(pos + 2);
+	}
+
+	std::filesystem::path full = rootPath.empty()
+		? std::filesystem::current_path() / "unpack-mods"
+		: std::filesystem::path(rootPath);
+	full /= name;
+	full.make_preferred();
+	return full.string();
 }
 
 uint32_t rage::fiDeviceLocal::GetAttributes(const char* fileName)

@@ -1,4 +1,6 @@
 #include "main.h"
+#include <cctype>
+#include <cstring>
 #include <mutex>
 #include <unordered_map>
 #include <shared_mutex>
@@ -18,9 +20,25 @@ static const uint8_t NOT_EXISTS = 2;
 static std::unordered_map<std::string, uint8_t> g_modsCache;
 static std::shared_mutex g_modsCacheMutex;
 
+// True for a path the engine already gave in absolute form. Those belong to a
+// stock tree, never to a mod layer, and joining them would silently discard the
+// configured root.
+static bool is_absolute(const char* path)
+{
+    if (!path || !*path)
+        return false;
+    if (path[0] == '\\' || path[0] == '/')
+        return true;
+    return std::isalpha(static_cast<unsigned char>(path[0])) && path[1] == ':' &&
+        (path[2] == '\\' || path[2] == '/');
+}
+
 static bool TryModsPath(const char* path, std::string& outModsPath)
 {
-    outModsPath = std::string("mods/") + path;
+    if (is_absolute(path))
+        return false;
+
+    outModsPath = config::device_path(config::mods_root(), path);
 
     // Used a hashmap for lookups so that we don't call GetFileAttributeA every time
     {
@@ -38,6 +56,90 @@ static bool TryModsPath(const char* path, std::string& outModsPath)
     return exists;
 }
 
+// ---------------------------------------------------------------------------
+// unpack-mods/ layer
+//
+// `mods/` mirrors the game directory, so prefixing the name is enough. The
+// unpack layer deliberately does not: it only carries the subtrees it
+// overrides, and the engine reaches most of them through a relative device path
+// rather than a `common:/` style name. The dlc packs live at
+// `update/x64/dlcpacks/<pack>`, so a pack placed at
+// `unpack-mods/dlcpacks/<pack>/dlc.rpf` has to be found when the engine probes
+// `update/x64/dlcpacks/<pack>/dlc.rpf`.
+//
+// Without this the pack never gets probed at all: dlclist walking asks whether
+// each entry exists and silently skips the ones that do not, so OpenArchiveHook
+// is never called for it.
+static std::unordered_map<std::string, std::string> g_overlayCache; // name -> overlay path, empty = none
+static std::shared_mutex g_overlayCacheMutex;
+
+static bool TryOverlayPath(const char* path, std::string& outPath)
+{
+    if (!path || !*path)
+        return false;
+
+    {
+        std::shared_lock lock(g_overlayCacheMutex);
+        auto it = g_overlayCache.find(path);
+        if (it != g_overlayCache.end())
+        {
+            if (it->second.empty())
+                return false;
+            outPath = it->second;
+            return true;
+        }
+    }
+
+    std::string result;
+
+    // Compare case-insensitively with both separators folded to '/'; the engine
+    // is not consistent about which one it uses.
+    std::string lowered;
+    lowered.reserve(path ? std::strlen(path) : 0);
+    for (const char* p = path; p && *p; ++p)
+        lowered.push_back(static_cast<char>(::tolower(static_cast<unsigned char>(*p == '\\' ? '/' : *p))));
+
+    // The unpack layer holds each overridden subtree at its root, so the
+    // `update/x64/` prefix the engine probes has to be dropped before joining.
+    static const std::string kUpdateX64 = "update/x64/";
+    if (lowered.compare(0, kUpdateX64.size(), kUpdateX64) == 0)
+    {
+        const std::string candidate = config::device_path(config::unpack_root(), path + kUpdateX64.size());
+        if (GetFileAttributesA(candidate.c_str()) != INVALID_FILE_ATTRIBUTES)
+            result = candidate;
+    }
+
+    {
+        std::unique_lock lock(g_overlayCacheMutex);
+        g_overlayCache[path] = result;
+    }
+
+    if (result.empty())
+        return false;
+
+    outPath = result;
+    return true;
+}
+
+// Resolves a redirect in priority order: `mods/` first (it mirrors the game
+// directory, so it is the exact-path override), then the unpack layer.
+static bool ResolveRedirect(const char* path, std::string& out, const char*& source)
+{
+    if (!path)
+        return false;
+    if (TryModsPath(path, out))
+    {
+        source = "mods";
+        return true;
+    }
+    if (TryOverlayPath(path, out))
+    {
+        source = "unpack";
+        return true;
+    }
+    return false;
+}
+
 static HANDLE OpenBulkImpl(void* device, const char* path, __int64* a3, OpenBulkFn orig)
 {
     logger::log("info", "[%s] Called with path /%s", __FUNCTION__, path);
@@ -48,12 +150,13 @@ static HANDLE OpenBulkImpl(void* device, const char* path, __int64* a3, OpenBulk
         forensics::note_file(path);
 
     std::string modsPath;
-    if (path && TryModsPath(path, modsPath))
+    const char* source = nullptr;
+    if (ResolveRedirect(path, modsPath, source))
     {
         // write(), not log(): redirects only happen for files that exist under
-        // mods/, so they are rare, and they are exactly the lines needed to
-        // tell whether a mod archive is being served.
-        logger::write("mods", "[%s] Redirecting to /%s", __FUNCTION__, modsPath.c_str());
+        // mods/ or unpack-mods/, so they are rare, and they are exactly the lines
+        // needed to tell whether a mod archive is being served.
+        logger::write("mods", "[%s] Redirecting to /%s (%s)", __FUNCTION__, modsPath.c_str(), source);
         HANDLE result = orig(device, modsPath.c_str(), a3);
         if (result && result != INVALID_HANDLE_VALUE)
             return result;
@@ -71,12 +174,10 @@ static FILETIME GetFileTimeImpl(void* device, const char* path, GetFileTimeFn or
     logger::log("info", "[%s] Called with path /%s", __FUNCTION__, path);
 
     std::string modsPath;
-    if (path && TryModsPath(path, modsPath))
+    const char* source = nullptr;
+    if (ResolveRedirect(path, modsPath, source))
     {
-        // write(), not log(): redirects only happen for files that exist under
-        // mods/, so they are rare, and they are exactly the lines needed to
-        // tell whether a mod archive is being served.
-        logger::write("mods", "[%s] Redirecting to /%s", __FUNCTION__, modsPath.c_str());
+        logger::write("mods", "[%s] Redirecting to /%s (%s)", __FUNCTION__, modsPath.c_str(), source);
         return orig(device, modsPath.c_str());
     }
     return orig(device, path);
@@ -87,12 +188,10 @@ static uint64_t GetFileSizeImpl(void* device, const char* path, GetFileSizeFn or
     logger::log("info", "[%s] Called with path /%s", __FUNCTION__, path);
 
     std::string modsPath;
-    if (path && TryModsPath(path, modsPath))
+    const char* source = nullptr;
+    if (ResolveRedirect(path, modsPath, source))
     {
-        // write(), not log(): redirects only happen for files that exist under
-        // mods/, so they are rare, and they are exactly the lines needed to
-        // tell whether a mod archive is being served.
-        logger::write("mods", "[%s] Redirecting to /%s", __FUNCTION__, modsPath.c_str());
+        logger::write("mods", "[%s] Redirecting to /%s (%s)", __FUNCTION__, modsPath.c_str(), source);
         return orig(device, modsPath.c_str());
     }
     return orig(device, path);
@@ -103,12 +202,10 @@ static uint64_t GetAttribsImpl(void* device, const char* path, GetAttrsFn orig)
     logger::log("info", "[%s] Called with path /%s", __FUNCTION__, path);
 
     std::string modsPath;
-    if (path && TryModsPath(path, modsPath))
+    const char* source = nullptr;
+    if (ResolveRedirect(path, modsPath, source))
     {
-        // write(), not log(): redirects only happen for files that exist under
-        // mods/, so they are rare, and they are exactly the lines needed to
-        // tell whether a mod archive is being served.
-        logger::write("mods", "[%s] Redirecting to /%s", __FUNCTION__, modsPath.c_str());
+        logger::write("mods", "[%s] Redirecting to /%s (%s)", __FUNCTION__, modsPath.c_str(), source);
         return orig(device, modsPath.c_str());
     }
     return orig(device, path);

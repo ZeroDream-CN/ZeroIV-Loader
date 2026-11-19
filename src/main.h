@@ -14,6 +14,7 @@
 #include "utils/memory.h"
 #include "utils/rpf.h"
 #include "utils/config.h"
+#include "utils/loosepack.h"
 
 #include "gtav/rage/fiDevice.h"
 #include "gtav/rage/fiPackfile.h"

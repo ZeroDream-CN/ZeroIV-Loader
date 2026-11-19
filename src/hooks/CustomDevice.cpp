@@ -1,170 +1,243 @@
 #include "main.h"
 #include <cstring>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 
 /*
-	List of stuff you can replace with this: https://gist.github.com/martonp96/59f731446c7f17db3f400c2be458c4a4
+	unpack-mods/ is an additive overlay. Historically a device was mounted
+	straight over `dlcpacks:/`, `common:/` and `platform:/`, which on GTA V
+	Enhanced hides the stock device for that mount point: every retail DLC then
+	resolves against the overlay and fails, and the game dies on the loading
+	screen without a message.
 
-	How to do it:
-	Find something from the list, eg. common:/data/dlclist.xml
+	Instead, one device is mounted at a private prefix (`unpack-mods:/`) and
+	OpenArchiveHook rewrites a path to it only when the modded file actually
+	exists. Everything that is not overridden keeps using its stock device, so
+	the retail packs still load from update/x64/dlcpacks.
 
-	Copy the original dlclist.xml from the files and place it in [your GTA5 folder]/newmods/common/data/dlclist.xml
-	Edit the file, add a new entry like <Item>dlcpacks:/mrpd/</Item>
-	Place the single player dlc.rpf like [your GTA5 folder]/newmods/dlcpacks/mrpd/dlc.rpf
+	An unpacked pack (a directory where a .rpf is expected) is accepted at either
 
-	Start the game and the modded stuff should be loaded automatically.
+		unpack-mods/dlcpacks/<pack>/dlc.rpf/
+		mods/update/x64/dlcpacks/<pack>/dlc.rpf/
 
-	I used this for the example: https://hu.gta5-mods.com/maps/community-mission-row-pd
+	but Enhanced cannot mount a directory at all: fiPackfile::Open rejects every
+	(flags, type) pair and reports the directory as a zero-length archive. Such a
+	pack is therefore turned into a real RPF7 in ZeroIVLoose/ at load time and
+	that archive is what gets mounted.
+
+	Both roots are configurable ([paths] mods / unpackMods) and default to
+	folders next to the executable.
 */
 
-rage::fiDeviceLocal* platformDevice;
-rage::fiDeviceLocal* platformDeviceCRC;
-rage::fiDeviceLocal* commonDevice;
-rage::fiDeviceLocal* commonDeviceCRC;
-rage::fiDeviceLocal* dlcDevice;
+static std::string g_overlayMount = "unpack-mods:/";
+static bool g_overlayMounted = false;
 
-bool IsCustomDevice(rage::fiDeviceLocal* dev)
+// The ini is read once; OpenArchiveHook runs for every pack the engine opens.
+static bool overlay_enabled()
 {
-	if (dev == platformDevice || dev == platformDeviceCRC || dev == commonDevice || dev == commonDeviceCRC || dev == dlcDevice)
+	static const bool enabled = config::get_value<bool>("config", "modsOverride", true);
+	return enabled;
+}
+
+struct overlayRoot
+{
+	const char* mount;   // stock mount point, e.g. "dlcpacks:/"
+	const char* sub;     // directory under the unpack root
+};
+
+// Only the mount points that carry whole archives are worth overlaying: a .meta
+// inside common.rpf is read through the packfile, not through a device path.
+static const overlayRoot g_overlayRoots[] = {
+	{ "dlcpacks:/", "dlcpacks" },
+	{ "platform:/", "platform" },
+	{ "common:/", "common" },
+};
+
+// Finds the overlay counterpart of a stock path. Returns true and writes the
+// rewritten path (unpack-mods:<sub>/<rest>) plus the physical path only when
+// file exists on disk, so a missing override never turns into a lookup that
+// fails where stock would have answered.
+static bool resolve_overlay(const char* path, std::string& out, std::filesystem::path& physical)
+{
+	if (!path || !g_overlayMounted)
+		return false;
+
+	for (const auto& root : g_overlayRoots)
+	{
+		const size_t prefixLen = std::strlen(root.mount);
+		if (_strnicmp(path, root.mount, prefixLen) != 0)
+			continue;
+
+		const char* rest = path + prefixLen;
+		physical = config::unpack_root() / root.sub / rest;
+
+		std::error_code ec;
+		if (!std::filesystem::exists(physical, ec))
+			return false;
+
+		out = g_overlayMount + root.sub + "/" + rest;
 		return true;
+	}
 	return false;
 }
 
-// Mounts one of the newmods overrides. The device is left untouched (and the
-// game keeps its stock mount) when the backing directory is missing, because an
-// override rooted at a non-existent path makes every lookup through that mount
-// point fail.
-static bool mount_override(const char* mountPoint, const std::filesystem::path& source,
-	const char* virtualPath)
-{
-	std::error_code ec;
-	if (!std::filesystem::is_directory(source, ec))
-	{
-		logger::write("device", "[%s] %s left stock: %s is missing",
-			__FUNCTION__, mountPoint, source.string().c_str());
-		return false;
-	}
-
-	rage::fiDeviceLocal* device = nullptr;
-	if (std::strcmp(mountPoint, "platform:/") == 0)
-		device = platformDevice;
-	else if (std::strcmp(mountPoint, "platformcrc:/") == 0)
-		device = platformDeviceCRC;
-	else if (std::strcmp(mountPoint, "common:/") == 0)
-		device = commonDevice;
-	else if (std::strcmp(mountPoint, "commoncrc:/") == 0)
-		device = commonDeviceCRC;
-	else
-		device = dlcDevice;
-
-	device->SetPath(virtualPath, true, nullptr);
-
-	if (!device->Mount(mountPoint))
-	{
-		logger::write("device", "[%s] %s left stock: mount failed", __FUNCTION__, mountPoint);
-		return false;
-	}
-
-	logger::write("device", "[%s] %s mounted from %s", __FUNCTION__, mountPoint, source.string().c_str());
-	return true;
-}
+static memory::func<rage::fiDevice*, const char*, bool> GetDeviceHook(IsEnhanced() ? "41 57 41 56 41 55 41 54 56 57 55 53 48 81 ec ? ? ? ? 89 d6 49 89 ce" :
+	"48 89 5C 24 ? 88 54 24 10 55 56 57 41 54 41 55 41 56 41 57 48 83 EC 20 48 8D 15 ? ? ? ? 41 B8");
 
 void(*InitialMountOrig)();
 void InitialMountHook()
 {
 	InitialMountOrig();
 
-	// Mounting an override device on a directory that does not exist leaves the
-	// game with a mount point that resolves to nothing, and GTA Enhanced then
-	// retries forever instead of booting. Only mount what is actually there.
-	if (!config::get_value<bool>("config", "modsOverride", true))
+	if (!overlay_enabled())
 	{
-		logger::write("device", "[%s] newmods overrides disabled by config", __FUNCTION__);
+		logger::write("device", "[%s] unpack overlay disabled by config", __FUNCTION__);
 		return;
 	}
 
-	std::filesystem::path cwd = std::filesystem::current_path() / "newmods";
-	cwd.make_preferred();
+	const std::filesystem::path root = config::unpack_root();
 
 	std::error_code ec;
-	if (!std::filesystem::is_directory(cwd, ec))
+	if (!std::filesystem::is_directory(root, ec))
 	{
 		logger::write("device", "[%s] %s is missing, using stock devices",
-			__FUNCTION__, cwd.string().c_str());
+			__FUNCTION__, root.string().c_str());
 		return;
 	}
 
-	logger::write("device", "[%s] Mods path: %s", __FUNCTION__, cwd.string().c_str());
+	// One device for the whole tree, mounted at a prefix no stock code uses. The
+	// stock mount points are deliberately left alone: shadowing `dlcpacks:/` is
+	// what made Enhanced crash before the first loading screen.
+	auto* overlay = new rage::fiDeviceLocal();
+	overlay->SetRootPath(root.string());
+	overlay->SetMountPrefix(g_overlayMount);
+	overlay->SetPath(root.string().c_str(), true, nullptr);
 
-	rage::fiDeviceLocal* rootDevice = new rage::fiDeviceLocal();
-	rootDevice->SetPath(cwd.string().c_str(), true, nullptr);
-
-	if (!rootDevice->Mount("mods:/"))
+	if (!overlay->Mount(g_overlayMount.c_str()))
 	{
-		logger::write("device", "[%s] mods:/ could not be mounted, using stock devices", __FUNCTION__);
+		logger::write("device", "[%s] %s could not be mounted, using stock devices",
+			__FUNCTION__, g_overlayMount.c_str());
 		return;
 	}
+	g_overlayMounted = true;
 
-	logger::write("device", "[%s] Root device mounted!", __FUNCTION__);
-
-	platformDevice = new rage::fiDeviceLocal();
-	platformDeviceCRC = new rage::fiDeviceLocal();
-	commonDevice = new rage::fiDeviceLocal();
-	commonDeviceCRC = new rage::fiDeviceLocal();
-	dlcDevice = new rage::fiDeviceLocal();
-
-	mount_override("platform:/", cwd / "platform", "mods:/platform/");
-	mount_override("platformcrc:/", cwd / "platform", "mods:/platform/");
-	mount_override("common:/", cwd / "common", "mods:/common/");
-	mount_override("commoncrc:/", cwd / "common", "mods:/common/");
-	mount_override("dlcpacks:/", cwd / "dlcpacks", "mods:/dlcpacks/");
+	logger::write("device", "[%s] %s mounted from %s (additive overlay)",
+		__FUNCTION__, g_overlayMount.c_str(), root.string().c_str());
 }
 
-static memory::func<rage::fiDevice*, const char*, bool> GetDeviceHook(IsEnhanced() ? "41 57 41 56 41 55 41 54 56 57 55 53 48 81 ec ? ? ? ? 89 d6 49 89 ce" :
-	"48 89 5C 24 ? 88 54 24 10 55 56 57 41 54 41 55 41 56 41 57 48 83 EC 20 48 8D 15 ? ? ? ? 41 B8");
-
 char (*OpenArchiveOrig)(rage::fiPackfile* a1, const char* path, char smth, int32_t type, __int64 a5);
-char OpenArchiveHook(rage::fiPackfile* a1, const char* path, char smth, int32_t type, __int64 a5)
+
+// Loose packs are built into an archive once per change and reused after that.
+// The engine asks for the same pack more than once per session, and a rebuild
+// copies the whole tree, so the result is remembered here as well.
+static std::mutex g_looseMutex;
+static std::unordered_map<std::string, std::string> g_looseBuilt;
+
+// Returns the archive path that stands in for a loose directory, or an empty
+// string when it cannot be built.
+static std::string synthesize_loose(const std::filesystem::path& dir)
 {
-	auto device = GetDeviceHook(path, true);
-	if (device && IsCustomDevice((rage::fiDeviceLocal*)device))
+	const std::string key = dir.lexically_normal().string();
+
 	{
-		if (device->GetAttributes(path) & FILE_ATTRIBUTE_DIRECTORY)
-		{
-			logger::log("device", "[%s] Archive %s is a directory!", __FUNCTION__, path);
-			type = 2;
-		}
+		std::lock_guard<std::mutex> lock(g_looseMutex);
+		auto it = g_looseBuilt.find(key);
+		if (it != g_looseBuilt.end())
+			return it->second;
 	}
 
-	logger::log("device", "[%s] Opening archive %s %d %d", __FUNCTION__, path, smth, type);
+	std::string error;
+	std::string built = loosepack::Prepare(dir, error);
+	if (built.empty())
+	{
+		logger::write("pack", "[%s] could not build %s: %s", __FUNCTION__, key.c_str(), error.c_str());
+		return {};
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(g_looseMutex);
+		g_looseBuilt[key] = built;
+	}
+	return built;
+}
+
+char OpenArchiveHook(rage::fiPackfile* a1, const char* path, char smth, int32_t type, __int64 a5)
+{
+	std::string overlaid;
+	std::filesystem::path overlayFile;
+	std::string built;
+	const char* usePath = path;
+
+	if (path && overlay_enabled() && resolve_overlay(path, overlaid, overlayFile))
+	{
+		usePath = overlaid.c_str();
+
+		std::error_code ec;
+		if (std::filesystem::is_directory(overlayFile, ec))
+		{
+			// Enhanced cannot mount a directory, so the unpacked tree is turned
+			// into a real archive first and that archive is what gets mounted.
+			built = synthesize_loose(overlayFile);
+			if (built.empty())
+			{
+				logger::write("pack", "[%s] %s is unpacked but no archive could be built",
+					__FUNCTION__, path);
+				return OpenArchiveOrig(a1, path, smth, type, a5);
+			}
+			usePath = built.c_str();
+			logger::write("pack", "[%s] %s is unpacked: mounting %s", __FUNCTION__,
+				path, usePath);
+		}
+		else
+		{
+			logger::write("device", "[%s] Overlay %s -> %s", __FUNCTION__, path, usePath);
+		}
+	}
+	else if (usePath)
+	{
+		// A directory reached without the overlay is an unpacked pack sitting
+		// either in the game tree itself or in mods/ under its stock path. Both
+		// are turned into an archive the same way.
+		std::error_code modsEc;
+		const std::filesystem::path modsPack = config::mods_root() / usePath;
+		bool unpacked = std::filesystem::is_directory(modsPack, modsEc);
+		std::filesystem::path unpackedPath = modsPack;
+
+		if (!unpacked)
+		{
+			if (auto device = GetDeviceHook(usePath, true))
+			{
+				const uint32_t attributes = device->GetAttributes(usePath);
+				unpacked = attributes != INVALID_FILE_ATTRIBUTES &&
+					(attributes & FILE_ATTRIBUTE_DIRECTORY);
+				unpackedPath = std::filesystem::current_path() / usePath;
+			}
+		}
+
+		if (unpacked)
+		{
+			built = synthesize_loose(unpackedPath);
+			if (!built.empty())
+			{
+				usePath = built.c_str();
+				logger::write("pack", "[%s] %s is unpacked: mounting %s", __FUNCTION__,
+					path, usePath);
+			}
+		}
+	}
 
 	// A mod archive is only useful once the game mounts it. Records are cheap
 	// and rare, and this is the one line that tells a mounted pack apart from a
 	// pack that was redirected to disk but never parsed: without it there is no
 	// way to tell whether a car failed to appear because the engine rejected it
 	// or because it never read it at all.
-	if (path)
-	{
-		const char* hit = nullptr;
-		for (const char* p = path; *p; ++p)
-		{
-			if ((p[0] == 'n' || p[0] == 'N') &&
-				(p[1] == 'i' || p[1] == 'I') &&
-				(p[2] == 's' || p[2] == 'S') &&
-				(p[3] == 'a' || p[3] == 'A'))
-			{
-				hit = p;
-				break;
-			}
-		}
-		if (hit)
-		{
-			const char result = OpenArchiveOrig(a1, path, smth, type, a5);
-			logger::write("pack", "[%s] mounted %s -> %d (type %d)", __FUNCTION__, path, (int)result, (int)type);
-			return result;
-		}
-	}
-
-	return OpenArchiveOrig(a1, path, smth, type, a5);
+	const char result = OpenArchiveOrig(a1, usePath, smth, type, a5);
+	if (built.empty())
+		logger::log("device", "[%s] Opening archive %s %d %d", __FUNCTION__, usePath, (int)smth, (int)type);
+	else
+		logger::write("pack", "[%s] mounted %s -> %d", __FUNCTION__, usePath, (int)result);
+	return result;
 }
 
 static memory::InitFuncs CustomDevice([] {

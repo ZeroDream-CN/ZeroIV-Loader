@@ -59,6 +59,8 @@ public:
 		add_default<bool>("debugConsole", "enabled", true, added);
 		add_default<std::string>("debugConsole", "host", "127.0.0.1", added);
 		add_default<int>("debugConsole", "port", 27183, added);
+		add_default<std::string>("paths", "mods", "", added);
+		add_default<std::string>("paths", "unpackMods", "", added);
 		if (added)
 			save();
 
@@ -79,6 +81,53 @@ public:
 	static bool get_log(const char* key)
 	{
 		return log_enabled(key);
+	}
+
+	// Storage root of one mod layer.
+	//
+	// An empty setting keeps the historical layout: the folder sits next to the
+	// executable, which is the working directory the game was started from. A
+	// relative value is resolved against that same directory, so a config can
+	// stay portable across machines. The result is canonical, which keeps the
+	// per-file redirection caches stable and lets a configured path live on
+	// another drive entirely.
+	static const std::filesystem::path& mods_root()
+	{
+		static const std::filesystem::path root = layer_root("mods", "mods");
+		return root;
+	}
+
+	static const std::filesystem::path& unpack_root()
+	{
+		static const std::filesystem::path root = layer_root("unpackMods", "unpack-mods");
+		return root;
+	}
+
+	// Where generated artifacts (archives built from unpacked packs) go. Not
+	// configurable on purpose: the engine reaches them through the game root
+	// device, so they have to stay beside the executable.
+	static const std::filesystem::path& cache_root()
+	{
+		static const std::filesystem::path root = std::filesystem::current_path() / "ZeroIVLoose";
+		return root;
+	}
+
+	// Name to hand to a game device for `<root>/<rest>`. A path under the
+	// working directory is passed relative, which is the form the stock
+	// fiDeviceLocal has always been fed; anything else has to be absolute.
+	static std::string device_path(const std::filesystem::path& root, const std::string& rest)
+	{
+		const std::filesystem::path target = root / rest;
+
+		std::error_code ec;
+		const std::filesystem::path rel = std::filesystem::relative(target, std::filesystem::current_path(), ec);
+		if (!ec && !rel.empty())
+		{
+			const std::string text = rel.generic_string();
+			if (text != ".." && text.rfind("../", 0) != 0)
+				return text;
+		}
+		return target.generic_string();
 	}
 
 	// Hot-path switches, cached at load time. logger::log runs per file
@@ -123,6 +172,26 @@ public:
 	}
 
 private:
+	// Resolves one `[paths]` entry. The configured value may be absolute, or
+	// relative to the working directory; empty falls back to `fallback` in the
+	// working directory.
+	static std::filesystem::path layer_root(const char* key, const char* fallback)
+	{
+		std::string configured = get_value<std::string>("paths", key, "");
+		if (configured.empty())
+			configured = fallback;
+
+		std::filesystem::path root(configured);
+		if (root.is_relative())
+			root = std::filesystem::current_path() / root;
+
+		std::error_code ec;
+		const std::filesystem::path canon = std::filesystem::weakly_canonical(root, ec);
+		if (!ec)
+			return canon;
+		return std::filesystem::absolute(root, ec);
+	}
+
 	struct Switches
 	{
 		bool info = false;

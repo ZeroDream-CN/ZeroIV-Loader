@@ -30,12 +30,35 @@ Two layouts are supported and they can be combined:
 
 - `mods/` — OpenIV-style per-file redirection. A file that exists under `mods/`
   replaces the stock asset with the same path (handled by `FileReadHooks`).
-- `newmods/` — directory override devices mounted over `platform:/`,
-  `common:/`, `dlcpacks:` and `mods:/`. Only overrides whose directory exists are
-  mounted; a missing `newmods/` leaves every stock device untouched. Set
-  `[config] modsOverride = false` to skip this entirely. An override rooted at a
-  directory that does not exist makes that mount point resolve to nothing, which
-  GTA V Enhanced answers with an endless retry loop instead of booting.
+- `unpack-mods/` — the unpacked layer. It only carries the subtrees it
+  overrides, so `unpack-mods/dlcpacks/<pack>/dlc.rpf` serves
+  `update/x64/dlcpacks/<pack>/dlc.rpf`, and the same applies to `platform/` and
+  `common/`. The directory is mounted at a private `unpack-mods:/` prefix and a
+  path is redirected to it only when the file exists there, so the retail packs
+  keep loading from their stock devices. A missing `unpack-mods/` changes
+  nothing. Set `[config] modsOverride = false` to skip this layer entirely.
+
+A `dlc.rpf` that is a directory rather than an archive is supported in both
+layouts: GTA V Enhanced cannot mount a directory as a packfile, so the folder is
+compiled into a real RPF7 under `ZeroIVLoose/` on first launch and remounted
+from there. The compiled archive is rebuilt automatically whenever a file in the
+folder changes.
+
+### Storage locations
+
+Both folders live next to the executable by default. Point them anywhere with
+the `[paths]` section of `ZeroIV.ini` — absolute paths are used as given, and
+relative ones resolve against the game directory:
+
+```ini
+[paths]
+; game directory by default
+mods = mods
+unpackMods = unpack-mods
+; examples
+; mods = D:/GTAV-Mods/mods
+; unpackMods = ../shared/unpack-mods
+```
 
 ## Debug console integration
 
