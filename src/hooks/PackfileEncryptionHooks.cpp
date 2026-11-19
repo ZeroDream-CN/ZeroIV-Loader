@@ -69,14 +69,11 @@ bool ParseHeaderHook(rage::fiPackfile* a1, const char* name, bool readHeader, vo
 		const bool open = openByArchive || openByGlobal;
 		int patched = 0;
 
-		// A mod archive reaching this point has been opened and its entry table
-		// parsed, which is what "the game can actually see the models" means.
-		// Logged unconditionally for mod packs: if a car never appears, this
-		// line decides whether the engine rejected the archive or never got to
-		// it, and that is the difference between a bad model and a bad loader.
-		if (name && strstr(name, "nisa31"))
-			logger::write("pack", "[%s] parsed %s: %d entries, open=%d, table=%p",
-				__FUNCTION__, name, count, (int)open, (void*)a1->entryTable);
+		// Whether an add-on pack was accepted is reported by OpenArchiveHook,
+		// which sees every archive name including the ones under mods/. This
+		// hook does not: the engine reaches a modded packfile through the local
+		// device and never passes its name here, so a check on it would only
+		// ever match a stock archive.
 
 		// GTA V parses an OPEN (unencrypted) RPF7 by itself, so poking the entry
 		// table is only needed on builds that reject them. The switch lets that

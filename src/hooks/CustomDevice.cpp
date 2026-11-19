@@ -233,11 +233,21 @@ char OpenArchiveHook(rage::fiPackfile* a1, const char* path, char smth, int32_t 
 	// way to tell whether a car failed to appear because the engine rejected it
 	// or because it never read it at all.
 	const char result = OpenArchiveOrig(a1, usePath, smth, type, a5);
-	if (built.empty())
+
+	// An add-on pack is always worth a line: when a car never appears, this is
+	// what tells "the engine mounted the archive" apart from "the loader never
+	// served it". The per-file device traces are off by default, so this cannot
+	// ride on them.
+	const bool addonPack = usePath && strstr(usePath, "dlcpacks/");
+	if (!built.empty())
+		logger::write("pack", "[%s] mounted %s -> %d", __FUNCTION__, usePath, (int)result);
+	else if (addonPack)
+		logger::write("pack", "[%s] Opening add-on archive %s %d %d -> %d%s", __FUNCTION__,
+			usePath, (int)smth, (int)type, (int)result,
+			result == 0 ? " (REJECTED)" : "");
+	else
 		logger::log("device", "[%s] Opening archive %s %d %d -> %d", __FUNCTION__, usePath,
 			(int)smth, (int)type, (int)result);
-	else
-		logger::write("pack", "[%s] mounted %s -> %d", __FUNCTION__, usePath, (int)result);
 	return result;
 }
 

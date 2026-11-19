@@ -140,6 +140,31 @@ static bool ResolveRedirect(const char* path, std::string& out, const char*& sou
     return false;
 }
 
+// Which spelling of a mods/ name this game's file device actually opens.
+//
+// The relative form is the one the stock device has always been fed and the one
+// GetFileAttributesA accepts, but a device resolves against its own root, not
+// the process working directory. When the first form fails every candidate is
+// tried once and the winner is remembered per file, so the hot path only pays
+// for this while the answer is unknown.
+static std::mutex g_modsFormMutex;
+static std::unordered_map<std::string, std::string> g_modsForm; // relative -> spelling that opened
+
+static std::string mods_open_name(const std::string& path)
+{
+    std::lock_guard<std::mutex> lock(g_modsFormMutex);
+    auto it = g_modsForm.find(path);
+    if (it != g_modsForm.end() && !it->second.empty())
+        return it->second;
+    return path;
+}
+
+static void remember_form(const std::string& path, const char* form)
+{
+    std::lock_guard<std::mutex> lock(g_modsFormMutex);
+    g_modsForm[path] = form ? form : "";
+}
+
 static HANDLE OpenBulkImpl(void* device, const char* path, __int64* a3, OpenBulkFn orig)
 {
     logger::log("info", "[%s] Called with path /%s", __FUNCTION__, path);
@@ -157,14 +182,56 @@ static HANDLE OpenBulkImpl(void* device, const char* path, __int64* a3, OpenBulk
         // mods/ or unpack-mods/, so they are rare, and they are exactly the lines
         // needed to tell whether a mod archive is being served.
         logger::write("mods", "[%s] Redirecting to /%s (%s)", __FUNCTION__, modsPath.c_str(), source);
-        HANDLE result = orig(device, modsPath.c_str(), a3);
+
+        const std::string known = mods_open_name(modsPath);
+        HANDLE result = orig(device, known.c_str(), a3);
         if (result && result != INVALID_HANDLE_VALUE)
             return result;
+
+        // The file is visibly there (GetFileAttributesA in TryModsPath proved it)
+        // and this device still refused to open it, so the name has to be spelled
+        // the way this particular device resolves it. A name is resolved against
+        // the device's own root, which is not necessarily the process working
+        // directory, so the relative form is only a guess. If it turns out to be
+        // wrong, the mod layer silently serves the stock file instead - which is
+        // invisible except for a mod pack that is "installed but not loading".
+        const DWORD firstError = ::GetLastError();
+
+        if (known == modsPath)
+        {
+            std::error_code ec;
+            const std::string absolute = std::filesystem::absolute(modsPath, ec).string();
+            const std::string dotted = "./" + modsPath;
+            std::string native = modsPath;
+            for (auto& c : native)
+                if (c == '/')
+                    c = '\\';
+
+            const char* candidates[] = { absolute.c_str(), dotted.c_str(), native.c_str() };
+            const char* labels[] = { "absolute", "dot-relative", "backslash" };
+            for (int i = 0; i < 3; ++i)
+            {
+                if (!candidates[i] || !*candidates[i])
+                    continue;
+                HANDLE alt = orig(device, candidates[i], a3);
+                const DWORD altError = ::GetLastError();
+                const bool opened = alt && alt != INVALID_HANDLE_VALUE;
+                logger::write("mods", "[%s] %s failed (%lu); %s form %s (%lu): %s",
+                    __FUNCTION__, modsPath.c_str(), firstError, labels[i],
+                    opened ? "works" : "fails", altError, candidates[i]);
+                if (opened)
+                {
+                    remember_form(modsPath, candidates[i]);
+                    return alt;
+                }
+            }
+        }
+
         // The file exists under mods/ but the game could not open it: say so,
         // because silently falling back to the stock path is what makes a mod
         // pack look "installed but not loading".
-        logger::write("mods", "[%s] Mod file could not be opened: /%s",
-            __FUNCTION__, modsPath.c_str());
+        logger::write("mods", "[%s] Mod file could not be opened: /%s (win32 %lu)",
+            __FUNCTION__, known.c_str(), firstError);
     }
     return orig(device, path, a3);
 }
@@ -178,7 +245,7 @@ static FILETIME GetFileTimeImpl(void* device, const char* path, GetFileTimeFn or
     if (ResolveRedirect(path, modsPath, source))
     {
         logger::write("mods", "[%s] Redirecting to /%s (%s)", __FUNCTION__, modsPath.c_str(), source);
-        return orig(device, modsPath.c_str());
+        return orig(device, mods_open_name(modsPath).c_str());
     }
     return orig(device, path);
 }
@@ -192,7 +259,7 @@ static uint64_t GetFileSizeImpl(void* device, const char* path, GetFileSizeFn or
     if (ResolveRedirect(path, modsPath, source))
     {
         logger::write("mods", "[%s] Redirecting to /%s (%s)", __FUNCTION__, modsPath.c_str(), source);
-        return orig(device, modsPath.c_str());
+        return orig(device, mods_open_name(modsPath).c_str());
     }
     return orig(device, path);
 }
@@ -206,7 +273,7 @@ static uint64_t GetAttribsImpl(void* device, const char* path, GetAttrsFn orig)
     if (ResolveRedirect(path, modsPath, source))
     {
         logger::write("mods", "[%s] Redirecting to /%s (%s)", __FUNCTION__, modsPath.c_str(), source);
-        return orig(device, modsPath.c_str());
+        return orig(device, mods_open_name(modsPath).c_str());
     }
     return orig(device, path);
 }
