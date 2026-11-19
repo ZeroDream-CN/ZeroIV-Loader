@@ -1,5 +1,9 @@
 # ZeroIV-Loader
 
+[![Build](https://github.com/ZeroDream-CN/ZeroIV-Loader/actions/workflows/build.yaml/badge.svg)](https://github.com/ZeroDream-CN/ZeroIV-Loader/actions/workflows/build.yaml)
+[![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE.txt)
+[![Latest release](https://img.shields.io/github/v/release/ZeroDream-CN/ZeroIV-Loader)](https://github.com/ZeroDream-CN/ZeroIV-Loader/releases/latest)
+
 ZeroIV-Loader is the open source RPF loader for GTA V, built as `ZeroIV.asi`.
 It is an alternative to `OpenIV.asi` for GTA V Legacy and `OpenRPF.asi` for
 GTA V Enhanced, and it feeds its log into ZeroIV's debug console in real time.
@@ -8,13 +12,24 @@ GTA V Enhanced, and it feeds its log into ZeroIV's debug console in real time.
 - Updated to support GTA V Legacy and Enhanced with the same binary by Chiheb-Bacha
 - Renamed and extended with the ZeroIV debug-console bridge
 
+## Download
+
+Grab `ZeroIV.asi` from the [latest release](https://github.com/ZeroDream-CN/ZeroIV-Loader/releases/latest)
+and follow [How to install](#how-to-install). Every release also ships the
+complete corresponding source archive and a `SHA256SUMS.txt`, so the binary can
+be verified against a build you make yourself.
+
+Requires an ASI loader (recommended:
+[Ultimate-ASI-Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader)) and a
+legitimately owned copy of GTA V. Single-player only.
+
 ## Benefits over OpenIV.asi
 
 - open source
 - supports all features of OpenIV.asi
 - Uses a hashmap as a cache for rpf path lookups, which makes it faster
 - supports multiple different versions of ASI Loaders (Recommended: https://github.com/ThirteenAG/Ultimate-ASI-Loader)
-- adds a new way to load mods (see Info section)
+- adds a new way to load mods (see [Mods layouts](#mods-layouts))
 
 ## Files
 
@@ -259,7 +274,10 @@ Notes:
 
 ## Info
 
-Check the [wiki](https://github.com/martonp96/ClosedIV/wiki) for more information.
+- Upstream projects: [ClosedIV](https://github.com/martonp96/ClosedIV)
+  (original, no longer reachable) and
+  [RageOpenV](https://github.com/Chiheb-Bacha/RageOpenV) (GPL-3.0 fork this
+  project descends from).
 
 ## Contact
 
