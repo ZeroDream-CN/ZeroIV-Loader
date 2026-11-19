@@ -25,6 +25,13 @@ if(GIT_FOUND)
     endif()
 endif()
 
+# Link the C/C++ runtime statically. The distributed artifact is a bare .asi
+# that is dropped next to the game executable, so importing msvcp140.dll or
+# vcruntime140.dll would make it fail to load on any machine without the Visual
+# C++ redistributable installed — and silently, because the ASI loader only
+# reports a missing dependency in its own log.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 file(GLOB_RECURSE PROJECT_SOURCE_FILES "src/*.h" "src/*.cpp")
 
 macro(GroupSources curdir groupindex)

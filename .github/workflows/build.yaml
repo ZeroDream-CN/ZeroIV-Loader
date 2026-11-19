@@ -46,6 +46,21 @@ jobs:
       - name: Build Release
         run: cmake --build BUILD --config Release
 
+      - name: Verify the ASI does not depend on the MSVC runtime
+        shell: pwsh
+        run: |
+          # A bare .asi has to be self-contained: importing these would make it
+          # fail to load wherever the VC++ redistributable is missing.
+          $path = 'BUILD/BIN/Release/ZeroIV.asi'
+          if (-not (Test-Path $path)) { throw "$path was not produced" }
+          $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($path))
+          $bad = @('MSVCP140.dll', 'VCRUNTIME140.dll', 'VCRUNTIME140_1.dll', 'MSVCR120.dll') |
+            Where-Object { $text.Contains($_) }
+          if ($bad.Count -gt 0) {
+            throw "ZeroIV.asi imports $($bad -join ', '): the C runtime must be linked statically (CMakeLists sets CMAKE_MSVC_RUNTIME_LIBRARY)."
+          }
+          Write-Host 'no MSVC runtime imports found'
+
       - name: Assemble release files
         shell: pwsh
         run: |
