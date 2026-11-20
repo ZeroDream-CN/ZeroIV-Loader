@@ -3,6 +3,13 @@
 #include <string>
 #include <vector>
 
+// Dynamic dlclist.xml registration and optional gameconfig.xml pool raises.
+//
+// gameconfig.xml handling (highest priority first):
+//   1. unpack-mods/gameconfig.xml — installed verbatim; ASI raises skipped
+//   2. [fivem] patchGameConfig=off|false — leave the archive entry alone
+//   3. patchGameConfig=true — raise listed pools (never lower a larger value)
+//
 // Dynamic dlclist.xml registration.
 //
 // A generated DLC is useless until the engine is told to mount it, and that list

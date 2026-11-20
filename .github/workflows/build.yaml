@@ -106,14 +106,21 @@ jobs:
           body: |
             **ZeroIV-Loader ${{ github.ref_name }}**
 
-            Download `ZeroIV.asi` and drop it next to `GTA5_Enhanced.exe`.
+            Download `ZeroIV.asi` and drop it in your GTA V folder (next to
+            `GTA5.exe` / `GTA5_Enhanced.exe`). Remove `OpenIV.asi` /
+            `OpenRPF.asi` if present.
 
-            - `ZeroIV-Loader-*-src.tar.gz` — complete corresponding source for
-              this binary (GPL-3.0-or-later). Build with `scripts/build-cross-linux.sh`
-              or `build.ps1`.
+            ### Highlights
+            - FiveM vehicle resources under `unpack-mods/` → auto `ziv_*` DLC + `dlclist`
+            - `gameconfig.xml`: auto pool raises, or your file at `unpack-mods/gameconfig.xml`, or `patchGameConfig=off`
+            - Pair large configs with Heap Limit Adjuster (~2048) and Packfile Limit Adjuster Enhanced
+
+            Player guide: see `docs/fivem-mods.md` in the source archive or the repository.
+
+            ### Assets
+            - `ZeroIV-Loader-*-src.tar.gz` — corresponding source (GPL-3.0-or-later). Build with `scripts/build-cross-linux.sh` or `build.ps1`.
             - `SHA256SUMS.txt` — checksums for every file above.
-            - `LICENSE.txt`, `THIRD-PARTY-NOTICES.txt` — licence terms; keep them
-              next to the binary when redistributing.
+            - `LICENSE.txt`, `THIRD-PARTY-NOTICES.txt` — keep next to the binary when redistributing.
           files: |
             dist/ZeroIV.asi
             dist/LICENSE.txt

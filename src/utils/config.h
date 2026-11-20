@@ -77,6 +77,10 @@ public:
 		// is genuinely plaintext. First start that converts a stock archive is
 		// slow; later starts are a no-op.
 		add_default<bool>("fivem", "plainifyRpf", true, added);
+		// Raise pool ceilings in update.rpf's gameconfig.xml. "off" / "false"
+		// leaves the archive alone. A file at unpack-mods/gameconfig.xml always
+		// wins: it is copied in and the automatic raises are skipped.
+		add_default<std::string>("fivem", "patchGameConfig", "true", added);
 		add_default<bool>("log", "info", false, added);
 		add_default<bool>("log", "mods", false, added);
 		add_default<bool>("log", "rpf", false, added);

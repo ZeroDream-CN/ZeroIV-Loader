@@ -272,6 +272,24 @@ Notes:
 - A `dlc.rpf` may be a real archive or an unpacked folder; folders are compiled
   into an archive under `ZeroIVLoose/` on first launch.
 
+## Add-on vehicles (FiveM resources)
+
+Drop each FiveM vehicle resource into `unpack-mods/<name>/` (with
+`fxmanifest.lua` or `__resource.lua`). On launch, ZeroIV builds a `ziv_*` DLC
+pack, registers it in `dlclist.xml`, and can raise `gameconfig.xml` pool
+ceilings so story mode can load the cars.
+
+For many packs you also need:
+
+- [Heap Limit Adjuster](https://www.gta5-mods.com/tools/heapadjuster) — try **2048** MiB
+- [Packfile Limit Adjuster Enhanced](https://www.gta5-mods.com/scripts/packfile-limit-adjuster-enhanced) — install the **`.asi`**, not only the `.ini`
+
+Optional: put your own `unpack-mods/gameconfig.xml` to use that file instead of
+the ASI's automatic raises, or set `[fivem] patchGameConfig = off` to leave the
+archive alone.
+
+**Player guide:** [docs/fivem-mods.md](docs/fivem-mods.md)
+
 ## Info
 
 - Upstream projects: [ClosedIV](https://github.com/martonp96/ClosedIV)
@@ -303,7 +321,7 @@ to forbid it no longer applies.
   submodule or download step is needed.
 - **Version traceability**: `VERSION` is the single source of truth for the
   release number, and the build records the commit. The startup log line
-  (`ZeroIV-Loader 1.0.0+abcdef12 inited`) ties a binary back to its tree.
+  (`ZeroIV-Loader 1.1.0+abcdef12 inited`) ties a binary back to its tree.
 - **Binaries**: when distributing ZeroIV.asi, ship `LICENSE.txt` and
   `THIRD-PARTY-NOTICES.txt` alongside it. MinHook (BSD-2-Clause) and inipp
   (MIT) both require their notice to accompany binary distributions.

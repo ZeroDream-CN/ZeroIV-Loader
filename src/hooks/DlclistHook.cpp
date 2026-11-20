@@ -6,6 +6,7 @@
 #include "utils/ngcrypt.h"
 #include "utils/rpftoc.h"
 
+#include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -168,6 +169,68 @@ namespace
 			return false;
 		out.write(data.data(), static_cast<std::streamsize>(data.size()));
 		return static_cast<bool>(out);
+	}
+
+	bool read_text(const fs::path& path, std::string& out)
+	{
+		std::ifstream in(path, std::ios::binary);
+		if (!in)
+			return false;
+		in.seekg(0, std::ios::end);
+		const auto size = in.tellg();
+		if (size < 0)
+			return false;
+		out.resize(static_cast<size_t>(size));
+		in.seekg(0, std::ios::beg);
+		if (out.empty())
+			return true;
+		in.read(out.data(), static_cast<std::streamsize>(out.size()));
+		return static_cast<bool>(in);
+	}
+
+	// Player override: unpack-mods/gameconfig.xml. When present it is installed
+	// as-is and the automatic pool raises are skipped.
+	fs::path user_gameconfig_path()
+	{
+		return config::unpack_root() / "gameconfig.xml";
+	}
+
+	// How gameconfig.xml in update.rpf is handled this start.
+	enum class GameConfigMode
+	{
+		Raise,   // apply kAttributeLimits / kPoolLimits (raise-only)
+		Leave,   // do not write the entry at all
+		Replace, // write the player's unpack-mods/gameconfig.xml verbatim
+	};
+
+	GameConfigMode gameconfig_mode(std::string& userXml)
+	{
+		userXml.clear();
+		std::error_code ec;
+		const fs::path userPath = user_gameconfig_path();
+		if (fs::is_regular_file(userPath, ec))
+		{
+			if (!read_text(userPath, userXml) || userXml.empty())
+			{
+				logger::write("fivem", "[gameconfig] %s exists but could not be read; "
+					"leaving the archive alone",
+					userPath.string().c_str());
+				userXml.clear();
+				return GameConfigMode::Leave;
+			}
+			return GameConfigMode::Replace;
+		}
+
+		const std::string raw = config::get_value<std::string>("fivem", "patchGameConfig", "true");
+		std::string value = trim(raw);
+		for (auto& c : value)
+			c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+
+		if (value.empty() || value == "true" || value == "1" || value == "on" || value == "yes")
+			return GameConfigMode::Raise;
+		// "off" / "false" / "0" / "no": leave the archive's gameconfig untouched.
+		// (Older builds treated false as "write stock back"; that overwrite is gone.)
+		return GameConfigMode::Leave;
 	}
 
 	// True when `entry` is one of the pack names this loader generates. Only its
@@ -400,45 +463,49 @@ namespace
 		uint64_t stock;
 	};
 
-	// Values below follow the community reference for this build rather than a
-	// guess: RDE 4.1.5 gameconfig.xml for GTA V 3889, maintained by Jax765 and
-	// PNWParksFan (github.com/pnwparksfan/gameconfig). The stock column is the
-	// value shipped in update/update.rpf for the same build, read back from the
-	// retail archive.
+	// Targets match pnwparksfan/gameconfig versions/3889 (RDE-synced). Stock is
+	// retail update.rpf for the same build. Verified working with the full RDE
+	// XML in mods/update/update.rpf plus HeapAdjuster 2048 and
+	// PackfileLimitAdjusterEnhanced. raiseOnly keeps any higher value already
+	// in the archive (e.g. a wholesale RDE replace).
 
 	// <Tag value="N"/> form, used by ConfigModelInfo and ConfigStreamingEngine.
-	//
-	// The model info ceilings are the ones that actually run out when a pack
-	// registers cars: every added car is a model info before it is an entity.
-	// ArchiveCount is sized for the add-on packs with room to spare but stays
-	// under the tier that needs Packfile Limit Adjuster; 4440 slots is already
-	// close to what retail fills.
 	const Limit kAttributeLimits[] = {
 		{ "MaxVehicleModelInfos", 5000, 320 },
 		{ "MaxExtraVehicleModelInfos", 5225, 640 },
-		{ "ArchiveCount", 4800, 4440 },
+		{ "MaxPedModelInfos", 5000, 725 },
+		{ "MaxExtraPedModelInfos", 5250, 440 },
+		{ "MaxWeaponModelInfos", 5000, 115 },
+		{ "MaxExtraWeaponModelInfos", 5130, 610 },
+		{ "MaxMloModelInfos", 5000, 220 },
+		{ "MaxMloInstances", 28000, 18000 },
+		{ "ArchiveCount", 6024, 4440 },
 	};
 
 	// <PoolName>X</PoolName><PoolSize value="N"/> form, inside PoolSizes.
-	//
-	// DrawableStore / TxdStore / DwdStore / fwArchetypePooledMap stay at stock:
-	// raising them to RDE-sized values erased the map even with HeapAdjuster.
-	// FragmentStore and MetaDataStore get a modest bump only — crash dumps with
-	// 18 add-on packs showed both at capacity (42000/42000 and 3200/3200) while
-	// mounting stream.rpf.
+	// Streaming stores follow RDE. Skipped when unpack-mods/gameconfig.xml exists
+	// or when [fivem] patchGameConfig=off.
 	const Limit kPoolLimits[] = {
 		{ "Vehicles", 300, 300 },
 		{ "VehicleStreamRequest", 240, 60 },
 		{ "VehicleStreamRender", 240, 100 },
 		{ "VehicleStruct", 600, 200 },
 		{ "HandlingData", 5450, 1800 },
-		{ "carrec", 4000, 4000 },
-		{ "MetaDataStore", 4000, 3200 },
-		{ "FragmentStore", 48000, 42000 },
-		{ "fwArchetypePooledMap", 64000, 64000 },
-		{ "DrawableStore", 81000, 81000 },
-		{ "TxdStore", 80200, 80200 },
-		{ "DwdStore", 20500, 20500 },
+		{ "carrec", 5500, 4000 },
+		{ "MetaDataStore", 6200, 3200 },
+		{ "FragmentStore", 299000, 42000 },
+		{ "fwArchetypePooledMap", 65521, 64000 },
+		{ "fwDynamicArchetypeComponent", 65521, 16384 },
+		{ "DrawableStore", 161965, 81000 },
+		{ "TxdStore", 213500, 80200 },
+		{ "DwdStore", 153800, 20500 },
+		{ "MapDataStore", 50000, 10020 },
+		{ "StaticBounds", 46700, 14700 },
+		{ "fwDynamicEntityComponent", 40000, 8192 },
+		{ "ActiveLoadedInfo", 24000, 3000 },
+		{ "MaxLoadRequestedInfo", 24000, 3000 },
+		{ "ActivePersistentLoadedInfo", 16000, 1439 },
+		{ "MaxLoadedInfo", 46000, 32768 },
 	};
 
 	// Rewrites one numeric or attribute value to `target`. `valueAt` is the
@@ -550,19 +617,16 @@ namespace
 		return changed;
 	}
 
-	// Returns the original text when every value already matches, so the caller
-	// can skip the write and keep the archive untouched on every later start.
-	// With `apply` false the stock values are written instead, which makes the
-	// config switch a real revert rather than a no-op.
-	std::string build_gameconfig(const std::string& original, bool apply, int& changed,
-		std::string& report)
+	// Raises listed ceilings toward their targets. Values already above a target
+	// are left alone (raiseOnly). Returns `original` when nothing changed.
+	std::string build_gameconfig(const std::string& original, int& changed, std::string& report)
 	{
 		std::string patched = original;
 		changed = 0;
 		for (const auto& limit : kAttributeLimits)
-			changed += raise_values(patched, limit.tag, apply ? limit.target : limit.stock, apply, report);
+			changed += raise_values(patched, limit.tag, limit.target, true, report);
 		for (const auto& limit : kPoolLimits)
-			changed += raise_pool(patched, limit.tag, apply ? limit.target : limit.stock, apply, report);
+			changed += raise_pool(patched, limit.tag, limit.target, true, report);
 		return changed == 0 ? original : patched;
 	}
 
@@ -754,7 +818,8 @@ namespace
 	// gameconfig.xml are never two separate rewrites of a 1.9 GB file.
 	bool install(const std::string& path, rpftoc::Table& table,
 		const std::string& xml, const std::vector<std::string>& packs,
-		const std::string& gameConfig, bool gameConfigEnabled, std::string& error)
+		const std::string& gameConfig, GameConfigMode gcMode, const std::string& userGameConfig,
+		std::string& error)
 	{
 		const int listIndex = table.find(kDlclistPath);
 		if (listIndex < 0)
@@ -781,28 +846,45 @@ namespace
 
 		int limits = 0;
 		std::string limitReport;
-		int gcAdded = 0;
-		std::string gcReport;
-		const std::string gcPatched =
-			build_gameconfig(gameConfig, gameConfigEnabled, gcAdded, gcReport);
-
+		std::string gcPatched;
 		const int gcIndex = table.find(kGameConfigPath);
 		bool gcCurrent = true;
-		if (gcIndex >= 0 && !gameConfig.empty())
-		{
-			// build_gameconfig reports no change exactly when every value already
-			// equals its target, so that is the whole condition.
-			gcCurrent = gcAdded == 0;
-			limits = gcAdded;
-			limitReport = gcReport;
-			if (!gcCurrent)
-				edits.push_back({ static_cast<uint32_t>(gcIndex), kGameConfigPath, gcPatched,
-					patched_gameconfig_path() });
-		}
-		else if (gcIndex < 0)
+		const char* gcAction = "left alone";
+
+		if (gcIndex < 0)
 		{
 			logger::write("fivem", "[gameconfig] %s has no %s entry, pool settings left alone",
 				path.c_str(), kGameConfigPath);
+		}
+		else if (gcMode == GameConfigMode::Leave)
+		{
+			gcAction = "skipped (patchGameConfig=off)";
+		}
+		else if (gcMode == GameConfigMode::Replace)
+		{
+			gcPatched = userGameConfig;
+			gcCurrent = !gameConfig.empty() && gcPatched == gameConfig;
+			gcAction = "user file";
+			if (!gcCurrent)
+			{
+				limits = 1;
+				limitReport = "replaced with unpack-mods/gameconfig.xml";
+				edits.push_back({ static_cast<uint32_t>(gcIndex), kGameConfigPath, gcPatched,
+					patched_gameconfig_path() });
+			}
+		}
+		else if (gameConfig.empty())
+		{
+			gcAction = "skipped (archive unread)";
+		}
+		else
+		{
+			gcPatched = build_gameconfig(gameConfig, limits, limitReport);
+			gcCurrent = (limits == 0);
+			gcAction = "raise";
+			if (!gcCurrent)
+				edits.push_back({ static_cast<uint32_t>(gcIndex), kGameConfigPath, gcPatched,
+					patched_gameconfig_path() });
 		}
 
 		// An archive whose table of contents is OPEN but whose payloads are still
@@ -813,9 +895,9 @@ namespace
 		{
 			logger::write("fivem", "[dlclist] %s: %zu bytes, every pack already registered",
 				path.c_str(), listPatched.size());
-			if (gcIndex >= 0 && !gameConfig.empty() && gcAdded == 0)
-				logger::write("fivem", "[gameconfig] %s: pool settings already match",
-					path.c_str());
+			if (gcIndex >= 0)
+				logger::write("fivem", "[gameconfig] %s: already current (%s)",
+					path.c_str(), gcAction);
 			return true;
 		}
 
@@ -830,8 +912,8 @@ namespace
 				path.c_str(), added, removed, listPatched.size(),
 				table.isOpen() ? "table was already plaintext" : "converted to plaintext");
 		if (limits > 0 && !gcCurrent)
-			logger::write("fivem", "[gameconfig] %s: adjusted %d pool setting(s): %s",
-				path.c_str(), limits, limitReport.c_str());
+			logger::write("fivem", "[gameconfig] %s: %s (%d): %s",
+				path.c_str(), gcAction, limits, limitReport.c_str());
 		return true;
 	}
 }
@@ -931,14 +1013,22 @@ namespace dlclist
 		// list: both live in this archive, and rewriting a 1.9 GB file twice per
 		// start is a needless risk.
 		//
-		// The switch means "apply or revert", not "on or off": turning it off
-		// writes the stock values back, so a table this loader inflated can always
-		// be undone without unpacking the archive by hand.
-		const bool gameConfigEnabled = config::get_value<bool>("fivem", "patchGameConfig", true);
-		if (!gameConfigEnabled)
-			logger::write("fivem", "[gameconfig] pool patch disabled: restoring stock values");
+		// Priority: unpack-mods/gameconfig.xml (verbatim replace, no raises) >
+		// patchGameConfig=true (raise listed pools) > off/false (leave alone).
+		std::string userGameConfig;
+		const GameConfigMode gcMode = gameconfig_mode(userGameConfig);
+		if (gcMode == GameConfigMode::Replace)
+			logger::write("fivem", "[gameconfig] using %s (ASI raises skipped)",
+				user_gameconfig_path().string().c_str());
+		else if (gcMode == GameConfigMode::Leave)
+		{
+			std::error_code ec;
+			if (!fs::is_regular_file(user_gameconfig_path(), ec))
+				logger::write("fivem", "[gameconfig] patchGameConfig=off; leaving archive alone");
+		}
 
 		std::string gameConfig;
+		if (gcMode != GameConfigMode::Leave)
 		{
 			const int gcIndex = table.find(kGameConfigPath);
 			if (gcIndex < 0)
@@ -958,7 +1048,7 @@ namespace dlclist
 			}
 		}
 
-		if (!install(mods.string(), table, xml, packs, gameConfig, gameConfigEnabled, error))
+		if (!install(mods.string(), table, xml, packs, gameConfig, gcMode, userGameConfig, error))
 		{
 			logger::write("fivem", "[dlclist] %s: %s", mods.string().c_str(), error.c_str());
 			i18n::show(i18n::Message::ConversionFailed);
