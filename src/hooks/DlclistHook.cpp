@@ -421,16 +421,11 @@ namespace
 
 	// <PoolName>X</PoolName><PoolSize value="N"/> form, inside PoolSizes.
 	//
-	// These are floors, not exact values: raise_number never shrinks an entry, so
-	// a gameconfig that already carries something larger keeps it. That matters
-	// because the streaming stores are what a big add-on fleet runs out of first,
-	// and an install tuned for it by hand is strictly better than this table.
-	//
-	// The store figures are the ones this install ran with while every mod
-	// vehicle still loaded. They are deliberately not the reference's far larger
-	// numbers: those are only safe behind a Heap Limit Adjuster, and reserving
-	// that much without the heap starves the streaming engine instead. The
-	// world goes low-poly, then disappears, then add-on models stop resolving.
+	// DrawableStore / TxdStore / DwdStore / fwArchetypePooledMap stay at stock:
+	// raising them to RDE-sized values erased the map even with HeapAdjuster.
+	// FragmentStore and MetaDataStore get a modest bump only — crash dumps with
+	// 18 add-on packs showed both at capacity (42000/42000 and 3200/3200) while
+	// mounting stream.rpf.
 	const Limit kPoolLimits[] = {
 		{ "Vehicles", 300, 300 },
 		{ "VehicleStreamRequest", 240, 60 },
@@ -438,11 +433,12 @@ namespace
 		{ "VehicleStruct", 600, 200 },
 		{ "HandlingData", 5450, 1800 },
 		{ "carrec", 4000, 4000 },
-		{ "fwArchetypePooledMap", 80000, 64000 },
-		{ "DrawableStore", 96000, 81000 },
-		{ "FragmentStore", 52000, 42000 },
-		{ "TxdStore", 96000, 80200 },
-		{ "DwdStore", 26000, 20500 },
+		{ "MetaDataStore", 4000, 3200 },
+		{ "FragmentStore", 48000, 42000 },
+		{ "fwArchetypePooledMap", 64000, 64000 },
+		{ "DrawableStore", 81000, 81000 },
+		{ "TxdStore", 80200, 80200 },
+		{ "DwdStore", 20500, 20500 },
 	};
 
 	// Rewrites one numeric or attribute value to `target`. `valueAt` is the
