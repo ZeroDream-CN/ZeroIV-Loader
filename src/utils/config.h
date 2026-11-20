@@ -67,10 +67,16 @@ public:
 		bool added = false;
 		add_default<bool>("config", "console", false, added);
 		add_default<bool>("config", "modsOverride", true, added);
-		add_default<bool>("config", "allowUnencryptedRpf", false, added);
+		// Kept for compatibility. OPEN archives are accepted without an
+		// in-memory NG stamp once plainifyRpf has rewritten payloads.
+		add_default<bool>("config", "allowUnencryptedRpf", true, added);
 		add_default<bool>("config", "dumpImage", false, added);
 		add_default<bool>("fivem", "enabled", true, added);
 		add_default<bool>("fivem", "patchStockUpdateRpf", false, added);
+		// On: decrypt every flag-1 payload and write an OPEN TOC so update.rpf
+		// is genuinely plaintext. First start that converts a stock archive is
+		// slow; later starts are a no-op.
+		add_default<bool>("fivem", "plainifyRpf", true, added);
 		add_default<bool>("log", "info", false, added);
 		add_default<bool>("log", "mods", false, added);
 		add_default<bool>("log", "rpf", false, added);

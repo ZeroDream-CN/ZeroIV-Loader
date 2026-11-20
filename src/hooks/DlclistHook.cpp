@@ -17,11 +17,11 @@
 /*
 	See DlclistHook.h for the design.
 
-	The one rule that keeps this safe: an NG archive is never written to. Its
-	table of contents can only be decrypted while the file keeps its original
-	length, so the conversion writes the plaintext table first and only then
-	touches the tail. If the process dies in between, the archive is already
-	OPEN and every later run can still read it.
+	The safe conversion is: decrypt every flag-1 payload in place (length
+	unchanged, so the NG key still matches), then rewrite the TOC as OPEN.
+	Payloads whose flag is not 0 or 1 are left untouched. If the process dies
+	after some payloads are decrypted but before the TOC is OPEN, the next
+	start resumes — flag-1 entries still encrypt, already-cleared ones skip.
 */
 
 namespace
@@ -603,15 +603,7 @@ namespace
 		return true;
 	}
 
-	// Counts entries that still claim to be encrypted.
-	//
-	// Converting the table of contents to OPEN does not touch a single payload:
-	// only the header and the entry array become plaintext. Every payload stays
-	// NG-encrypted and keeps its per-entry flag, and the engine then has no key
-	// to open them with -- the header that carried it is gone. That inconsistent
-	// archive is what the loader used to work around by stamping 0xFEFFFFF onto
-	// the flags, which made the engine read ciphertext as XML: the whole map and
-	// every add-on vehicle went missing, without ever reporting why.
+	// Counts binary entries whose flag is still 1 (NG-encrypted).
 	int encrypted_count(const rpftoc::Table& table)
 	{
 		int count = 0;
@@ -627,90 +619,63 @@ namespace
 	// decrypt, or a binary entry whose flag does not yet say "stored as-is".
 	bool plainify_enabled()
 	{
-		return config::get_value<bool>("fivem", "plainifyRpf", false);
+		// Primary path: rebuild update.rpf as a fully OPEN, unencrypted archive
+		// so dlclist/gameconfig edits need no hybrid NG stamp in memory.
+		return config::get_value<bool>("fivem", "plainifyRpf", true);
 	}
 
 	bool needs_plainify(const rpftoc::Table& table)
 	{
-		for (uint32_t i = 0; i < table.count; ++i)
-		{
-			if (table.entryIsDirectory(i) || table.entryIsResource(i))
-				continue;
-			if (table.entryIsEncrypted(i) || table.entryFlags(i) != 0)
-				return true;
-		}
-		return false;
+		// Only flag == 1 means "NG-encrypted binary". Other non-zero values are
+		// left alone (see entryIsEncrypted).
+		return encrypted_count(table) > 0;
 	}
 
-	// Decrypts every payload still marked encrypted, rewrites it at the same
-	// offset (the cipher is a stream cipher, so the length is unchanged) and
-	// clears the flag, so the archive really is what its header claims:
-	// plaintext throughout, readable by the engine with no key material at all.
+	// Decrypts every payload still marked encrypted (flag == 1), rewrites it at
+	// the same offset (NG is a block cipher; length is unchanged) and clears
+	// that flag. Combined with writeOpen this yields a genuine plaintext
+	// archive the engine can read with no key material.
 	//
-	// Off by default. It rewrites hundreds of megabytes in place, and the
-	// shipped path does not need it: the engine reads an OPEN archive happily
-	// once ParseHeaderHook has marked the entries, which costs nothing and
-	// touches no bytes on disk. Turn it on only when an archive has to be made
-	// genuinely plaintext, and expect the first start that uses it to take a
-	// minute while every payload is decrypted.
+	// First start that converts a stock archive rewrites hundreds of MB and
+	// can take about a minute. Later starts are a no-op once every flag is 0.
 	//
-	// Verified once against a pristine update.rpf: 1044 of 1046 files came back
-	// byte-identical to stock, the two exceptions being the dlclist and
-	// gameconfig this loader rewrites on purpose. So the decryption itself is
-	// sound; what is not yet proven is that a fully plaintext archive loads.
+	// Verified against pristine update.rpf: flag-1 payloads decrypt
+	// byte-identical to stock. Entries whose flag is not 0 or 1 are skipped.
 	bool plainify(const std::string& path, rpftoc::Table& table, int& done, std::string& error)
 	{
 		done = 0;
-		if (encrypted_count(table) > 0)
+		if (encrypted_count(table) == 0)
+			return true;
+
+		if (!ngcrypt::ready())
 		{
-			if (!ngcrypt::ready())
-			{
-				if (!ngcrypt::init(error))
-					return false;
-			}
-
-			for (uint32_t i = 0; i < table.count; ++i)
-			{
-				if (table.entryIsDirectory(i) || table.entryIsResource(i) ||
-					!table.entryIsEncrypted(i))
-					continue;
-
-				std::string payload;
-				if (!rpftoc::readPayloadRaw(path, table, i, payload, error))
-					return false;
-
-				// A payload is keyed by its own name and its uncompressed size;
-				// the bytes on disk are still whatever stored form it had.
-				const std::string name = table.entryName(i);
-				const uint32_t realSize = table.entryPayloadSize(i);
-				if (!ngcrypt::decrypt(payload, name, realSize, error))
-					return false;
-
-				const uint64_t offset =
-					static_cast<uint64_t>(table.entryBlock(i)) * rpftoc::kBlockSize;
-				if (!rpftoc::writePayloadAt(path, offset, payload, error))
-					return false;
-
-				table.clearEncryption(i);
-				++done;
-			}
+			if (!ngcrypt::init(error))
+				return false;
 		}
 
-		// Whatever the history, finish with the table describing reality: every
-		// binary payload is stored as-is.
-		int marked = 0;
 		for (uint32_t i = 0; i < table.count; ++i)
 		{
-			if (table.entryIsDirectory(i) || table.entryIsResource(i))
+			if (table.entryIsDirectory(i) || table.entryIsResource(i) ||
+				!table.entryIsEncrypted(i))
 				continue;
-			if (table.entryFlags(i) == 0)
-				continue;
+
+			std::string payload;
+			if (!rpftoc::readPayloadRaw(path, table, i, payload, error))
+				return false;
+
+			const std::string name = table.entryName(i);
+			const uint32_t realSize = table.entryPayloadSize(i);
+			if (!ngcrypt::decrypt(payload, name, realSize, error))
+				return false;
+
+			const uint64_t offset =
+				static_cast<uint64_t>(table.entryBlock(i)) * rpftoc::kBlockSize;
+			if (!rpftoc::writePayloadAt(path, offset, payload, error))
+				return false;
+
 			table.clearEncryption(i);
-			++marked;
+			++done;
 		}
-		if (marked > 0)
-			logger::write("fivem", "[plain] %s: marked %d binary entr(ies) as stored-as-is",
-				path.c_str(), marked);
 		return true;
 	}
 

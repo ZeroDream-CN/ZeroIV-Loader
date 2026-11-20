@@ -99,10 +99,14 @@ namespace rpftoc
 
 	bool Table::entryIsResource(uint32_t index) const
 	{
-		if (index >= count)
+		if (index >= count || entryIsDirectory(index))
 			return false;
-		return (le32(entries.data() + static_cast<size_t>(index) * 16 + 4) & 0xFFFFFF00) ==
-			kDirectoryIdent;
+		// Bit 23 of the 24-bit offset field. The previous test compared the
+		// directory sentinel at +4 with a mask, which matched directories and
+		// almost never matched a real resource. plainify then treated .ymt
+		// resources as binary, zeroed their graphicsFlags at +12, and the
+		// engine exited with ERR_SYS_INVALIDRESOURCE_5.
+		return (le24(entries.data() + static_cast<size_t>(index) * 16 + 5) & 0x800000) != 0;
 	}
 
 	uint32_t Table::entryNameOffset(uint32_t index) const
@@ -164,10 +168,11 @@ namespace rpftoc
 	{
 		if (index >= count || entryIsDirectory(index) || entryIsResource(index))
 			return false;
-		const uint32_t flag = le32(entries.data() + static_cast<size_t>(index) * 16 + 12);
-		// Zero is what every archive this loader writes uses for "stored as-is";
-		// anything else is an encryption type the engine will act on.
-		return flag != 0;
+		// CodeWalker only accepts 0 (plain) or 1 (encrypted). Other values at
+		// this offset on binary-looking entries (e.g. 0x20000000 on map .ymt)
+		// are not NG encryption types — treating them as ciphertext and
+		// decrypting or zeroing them is what previously destroyed the map.
+		return le32(entries.data() + static_cast<size_t>(index) * 16 + 12) == 1;
 	}
 
 	uint32_t Table::entryFlags(uint32_t index) const

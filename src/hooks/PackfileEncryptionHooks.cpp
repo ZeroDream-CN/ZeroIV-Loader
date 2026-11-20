@@ -2,10 +2,17 @@
 
 static const int OPEN = 0x4E45504F;
 
+// The encryption type of the archive currently being parsed on this thread.
+// FindEncryptionHook runs just before ParseHeader for the same archive, so a
+// thread-local captures that value without the cross-thread stale-global
+// problem that a plain static has on Enhanced (several archives parse at once).
+thread_local uint32_t g_parseEncryption = 0;
+
 uint32_t currentEncryption;
 bool FindEncryptionHook(uint32_t encryption)
 {
 	currentEncryption = encryption;
+	g_parseEncryption = encryption;
 	return (encryption & 0xFF00000) == 0xFE00000;
 }
 
@@ -48,13 +55,13 @@ bool ParseHeaderHook(rage::fiPackfile* a1, const char* name, bool readHeader, vo
 		}
 		logger::log("mods", "[%s] fileCount /%d", __FUNCTION__, a1->filesCount);
 
-		// The archive records its own encryption; trusting the global set by
-		// FindEncryptionHook is not safe because Enhanced streams archives from
-		// several threads at once. A stale OPEN from the unencrypted mod pack
-		// would make an encrypted stock archive be treated as plain text, and
-		// the resources read out of it are garbage.
+		// After ParseHeaderOrig the packfile's encryptionMagic field is not
+		// reliably still "OPEN": the engine may rewrite it to its internal
+		// sentinel. The value FindEncryptionHook saw for *this* parse is the
+		// one that decides whether the archive on disk is plaintext-TOC.
+		const bool openByParse = g_parseEncryption == OPEN;
 		const bool openByArchive = a1->encryptionMagic == OPEN;
-		const bool openByGlobal = currentEncryption == OPEN;
+		const bool isOpen = openByParse || openByArchive;
 		// A bogus count would walk off the entry table and corrupt the heap.
 		const int count = a1->filesCount;
 		const bool sane = count >= 0 && count <= 1000000 && a1->entryTable != nullptr;
@@ -65,49 +72,16 @@ bool ParseHeaderHook(rage::fiPackfile* a1, const char* name, bool readHeader, vo
 			return ret;
 		}
 
-		int patched = 0;
-
-		// GTA V parses an OPEN (unencrypted) RPF7 by itself, so this loop is a
-		// workaround for builds that reject one -- and it is off by default
-		// because it is actively dangerous. 0xFEFFFFF is the sentinel the engine
-		// reads as "plaintext", so stamping it onto an entry whose payload is
-		// still ciphertext turns that file into garbage the moment it is read.
-		//
-		// mods/update/update.rpf is exactly that shape: converting the table of
-		// contents to OPEN rewrites the header and the TOC only, while the
-		// payloads -- including every map district .ymt and the vehicle metadata
-		// -- stay NG-encrypted and keep their per-entry flag. Clearing those
-		// flags took out the whole world map and every add-on vehicle at once.
-		//
-		// The stale-global test that used to arm this was wrong in the same way:
-		// a mod pack parsed on another thread leaves currentEncryption on OPEN,
-		// which says nothing about the archive being parsed now.
-		static const bool allowPatching =
-			config::get_value<bool>("config", "allowUnencryptedRpf", false);
-		if (openByArchive && allowPatching)
+		// Fully plaintext OPEN archives (plainifyRpf, and every ziv_* pack)
+		// need no marker. A hybrid OPEN TOC with still-encrypted payloads is
+		// no longer the supported path: stamping NG here made the map vanish
+		// or crashed when the stamp was skipped. Leave OPEN archives alone.
+		if (isOpen)
 		{
-			for (int i = 0; i < count; ++i)
-			{
-				Entry* v21 = (Entry*)(a1->entryTable + 16 * i);
-				if (v21->IsBinary() && v21->bin.nameOffset > 0 && v21->bin.isEncrypted)
-				{
-					v21->bin.isEncrypted = 0xFEFFFFF;
-					++patched;
-				}
-			}
-
-			a1->currentFileOffset = 0xFEFFFFF;
-		}
-
-		// Unencrypted archives are rare (only the mod packs), so this stays
-		// always-on: it is the line that tells whether a mod archive was
-		// actually accepted. A stale global is reported, never acted on.
-		if (openByArchive || openByGlobal)
-		{
-			logger::write("mods", "[%s] unencrypted archive /%s: %d entries, patched %d%s%s",
-				__FUNCTION__, name, count, patched,
-				openByArchive ? "" : " (stale global, ignored)",
-				allowPatching ? "" : " (patching disabled by config)");
+			logger::write("mods", "[%s] unencrypted archive /%s: %d entries"
+				" (parse=0x%08X magic=0x%08X)",
+				__FUNCTION__, name, count,
+				g_parseEncryption, a1->encryptionMagic);
 		}
 	}
 	return ret;
