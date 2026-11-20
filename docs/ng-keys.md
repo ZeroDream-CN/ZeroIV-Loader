@@ -39,12 +39,10 @@ For machines that cannot run a first extract, place a 306,256-byte blob at
 
 ```bash
 # After updating src/resources/magic.dat from CodeWalker / gtalib-go:
-python3 - <<'PY'
-from pathlib import Path
-data = Path('src/resources/magic.dat').read_bytes()
-# ... rewrite src/utils/ngmagic_data.cpp (see git history / prior embed script)
-PY
+python3 scripts/embed-magic.py
 ```
+
+That rewrites `src/utils/ngmagic_data.cpp`. Rebuild the ASI afterwards.
 
 ## Why not ship plaintext keys
 

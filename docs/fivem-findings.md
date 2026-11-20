@@ -33,7 +33,10 @@ Earlier map wipe: RDE-sized streaming stores at Heap **1024** without Packfile A
 | `[fivem] patchGameConfig=off` (or `false`) | Leave archive `gameconfig.xml` untouched |
 | `patchGameConfig=true` (default) | Raise listed pools only (never lower) |
 
-`dlclist.xml` is unchanged: only `dlcpacks:/ziv_*` entries are managed; other items stay.
+`dlclist.xml`: `ziv_*` packs track FiveM resources. With
+`registerAddonPacks=true`, traditional addon folders are also registered and
+tracked in `unpack-mods/.cache/registered-addon-packs.txt` (stock retail DLC
+names are never pruned).
 
 ## Reference: [pnwparksfan/gameconfig](https://github.com/pnwparksfan/gameconfig) `versions/3889`
 
@@ -93,4 +96,9 @@ Vehicle stream pools (`VehicleStreamRequest`/`Render` 240, `VehicleStruct` 600) 
 - `plainifyRpf` default **true**
 - `entryIsEncrypted` → `flag == 1` only; `entryIsResource` uses offset bit 23
 - `ParseHeaderHook` — no NG stamp on OPEN archives
-- `kPoolLimits` / `kAttributeLimits` — RDE targets; skipped if user `gameconfig.xml` or `patchGameConfig=off`
+- `kPoolLimits` / `kAttributeLimits` — Legacy vs Enhanced targets via
+  `IsEnhanced()`; cross-edition clamp when the other edition’s ASI target is
+  still in the archive; skipped if user `gameconfig.xml` or `patchGameConfig=off`
+- `rsccompat` — Gen8/Gen9 RSC version scan + optional MessageBox
+- `forensics` — skip `MiniDumpWriteDump` on Wine/Proton; fatal watchdog if
+  ExitProcess never runs

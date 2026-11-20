@@ -279,6 +279,13 @@ Drop each FiveM vehicle resource into `unpack-mods/<name>/` (with
 pack, registers it in `dlclist.xml`, and can raise `gameconfig.xml` pool
 ceilings so story mode can load the cars.
 
+On **Enhanced**, convert Gen8 stream assets to Gen9 before placing them under
+`unpack-mods/`. ZeroIV warns at startup when RSC versions do not match the
+running game.
+
+Traditional `dlcpacks/<name>/dlc.rpf` folders can also be auto-registered
+(`[fivem] registerAddonPacks=true`).
+
 For many packs you also need:
 
 - [Heap Limit Adjuster](https://www.gta5-mods.com/tools/heapadjuster) — try **2048** MiB
@@ -321,7 +328,7 @@ to forbid it no longer applies.
   submodule or download step is needed.
 - **Version traceability**: `VERSION` is the single source of truth for the
   release number, and the build records the commit. The startup log line
-  (`ZeroIV-Loader 1.1.0+abcdef12 inited`) ties a binary back to its tree.
+  (`ZeroIV-Loader 1.2.0+abcdef12 inited`) ties a binary back to its tree.
 - **Binaries**: when distributing ZeroIV.asi, ship `LICENSE.txt` and
   `THIRD-PARTY-NOTICES.txt` alongside it. MinHook (BSD-2-Clause) and inipp
   (MIT) both require their notice to accompany binary distributions.

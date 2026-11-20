@@ -1,9 +1,13 @@
 #include "main.h"
 #include "utils/forensics.h"
+#include "utils/shutdown.h"
 #include "hooks/BindDescriptorHooks.h"
 
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <thread>
 
 /*
 	Why this exists
@@ -408,14 +412,69 @@ namespace forensics
 			bindhooks::dump_recent(8);
 		}
 
+		bool running_on_wine()
+		{
+			static const bool wine = []() {
+				HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+				return ntdll && GetProcAddress(ntdll, "wine_get_version") != nullptr;
+			}();
+			return wine;
+		}
+
+		// If forensics itself hangs (MiniDumpWriteDump under Wine is a known
+		// case), ExitProcess never runs and the exit watchdog never arms. This
+		// one is started from the first fatal report so the process cannot sit
+		// forever after the window is gone.
+		void arm_fatal_watchdog()
+		{
+			static std::atomic<bool> armed{ false };
+			if (armed.exchange(true))
+				return;
+
+			int grace = config::get_value<int>("config", "exitTimeoutSeconds", 10);
+			if (grace <= 0)
+				grace = 10;
+
+			try
+			{
+				std::thread([grace]() {
+					const auto deadline =
+						std::chrono::steady_clock::now() + std::chrono::seconds(grace);
+					while (std::chrono::steady_clock::now() < deadline)
+					{
+						if (exitguard::stopping())
+							return;
+						std::this_thread::sleep_for(std::chrono::milliseconds(100));
+					}
+					exitguard::trace("fatal watchdog: terminating hung process");
+					::TerminateProcess(::GetCurrentProcess(), 1);
+				}).detach();
+			}
+			catch (...)
+			{
+			}
+		}
+
 		// Writes one minidump for the first access violation of the session.
 		// Every thread's stack is included, plus the info needed to resolve the
 		// addresses offline against the dumped image; full memory is left out
 		// because this process maps many gigabytes.
+		//
+		// Skipped on Wine/Proton: MiniDumpWriteDump suspends every thread while
+		// holding the VEH stack, and under Wine that routinely deadlocks on
+		// quit-time faults in ntdll — the process then never reaches ExitProcess
+		// (empty ZeroIV.crash.dmp + no ZeroIV.exit.log line).
 		void write_minidump(EXCEPTION_POINTERS* info, const char* path)
 		{
 			if (!g_miniDumpWrite || g_dumped)
 				return;
+			if (running_on_wine())
+			{
+				logger::write("fatal", "  [dump] skipped on Wine/Proton (MiniDumpWriteDump "
+					"deadlocks inside VEH)");
+				g_dumped = true;
+				return;
+			}
 			g_dumped = true;
 
 			HANDLE file = CreateFileA(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
@@ -544,6 +603,10 @@ namespace forensics
 				return;
 			if (InterlockedCompareExchange(&g_reporting, 1, 0) != 0)
 				return;
+
+			// Quit-time faults often never reach ExitProcess (especially when the
+			// handler itself blocks). Arm a watchdog before any further work.
+			arm_fatal_watchdog();
 
 			logger::write("fatal", "game stopped: %s 0x%08X at %s",
 				code_name(code), code, where[0] ? where : "unknown module");

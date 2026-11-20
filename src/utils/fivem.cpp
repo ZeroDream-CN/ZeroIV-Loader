@@ -1,6 +1,8 @@
 #include "main.h"
 #include "utils/fivem.h"
 #include "utils/dlcgen.h"
+#include "utils/rsccompat.h"
+#include "utils/i18n.h"
 #include "hooks/DlclistHook.h"
 
 #include <algorithm>
@@ -884,8 +886,22 @@ namespace fivem
 				config::unpack_root().string().c_str());
 
 		std::vector<std::string> packs;
+		std::vector<rsccompat::Hit> compatHits;
+		const bool warnIncompatible =
+			config::get_value<bool>("fivem", "warnIncompatibleResources", true);
+		const bool enhanced = IsEnhanced();
+
 		for (const auto& resource : resources)
 		{
+			if (warnIncompatible)
+			{
+				std::vector<std::string> paths = resource.assets;
+				for (const auto& file : resource.dataFiles)
+					paths.push_back(file.path);
+				rsccompat::ScanFiveMAssets(resource.name, resource.dir, paths, enhanced,
+					compatHits);
+			}
+
 			std::string error;
 			const dlcgen::BuildResult result = dlcgen::Build(resource, error);
 			if (result == dlcgen::BuildResult::Failed)
@@ -915,6 +931,29 @@ namespace fivem
 		const std::set<std::string> stockPacks = list_stock_packs();
 		const std::set<std::string> previousAddons = load_addon_manifest();
 		const std::vector<std::string> discovered = discover_addon_packs(stockPacks);
+
+		// Loose OpenIV-style packs (directory shaped like dlc.rpf/) can also
+		// carry unconverted stream assets; scan those the same way.
+		if (warnIncompatible)
+		{
+			const fs::path looseRoot = config::unpack_root() / "dlcpacks";
+			std::error_code ec;
+			if (fs::is_directory(looseRoot, ec))
+			{
+				for (const auto& entry : fs::directory_iterator(looseRoot, ec))
+				{
+					if (!entry.is_directory(ec))
+						continue;
+					const std::string name = entry.path().filename().string();
+					if (name.empty() || name[0] == '.' || is_ziv_pack(name) ||
+						name_in_set_ci(stockPacks, name))
+						continue;
+					const fs::path loose = entry.path() / "dlc.rpf";
+					if (fs::is_directory(loose, ec))
+						rsccompat::ScanTree(name, loose, enhanced, compatHits);
+				}
+			}
+		}
 
 		std::vector<std::string> pruneAddons;
 		for (const auto& name : previousAddons)
@@ -977,6 +1016,21 @@ namespace fivem
 				nextManifest.insert(name);
 		if (nextManifest != previousAddons)
 			save_addon_manifest(nextManifest);
+
+		if (warnIncompatible && !compatHits.empty())
+		{
+			std::vector<std::string> badPacks;
+			std::set<std::string> seenPacks;
+			for (const auto& hit : compatHits)
+			{
+				if (seenPacks.insert(hit.pack).second)
+					badPacks.push_back(hit.pack);
+			}
+			logger::write("fivem", "[compat] %d incompatible file(s) in %d pack(s); "
+				"showing warning", static_cast<int>(compatHits.size()),
+				static_cast<int>(badPacks.size()));
+			i18n::showIncompatibleResources(badPacks, static_cast<int>(compatHits.size()));
+		}
 
 		logger::write("fivem", "[init] %d pack(s) armed for dlclist in %llums",
 			static_cast<int>(packs.size()),

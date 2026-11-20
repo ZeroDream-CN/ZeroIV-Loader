@@ -84,6 +84,9 @@ public:
 		// Register traditional (non-FiveM) dlcpacks folders into dlclist.xml.
 		// FiveM resources under unpack-mods/ are always scanned regardless.
 		add_default<bool>("fivem", "registerAddonPacks", true, added);
+		// Warn (MessageBox + log) when stream assets are the wrong generation
+		// for this build (Gen8 on Enhanced / Gen9 on Legacy).
+		add_default<bool>("fivem", "warnIncompatibleResources", true, added);
 		add_default<bool>("log", "info", false, added);
 		add_default<bool>("log", "mods", false, added);
 		add_default<bool>("log", "rpf", false, added);

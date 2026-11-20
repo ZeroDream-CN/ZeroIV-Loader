@@ -3,8 +3,9 @@
 ZeroIV-Loader can turn **FiveM-style vehicle resources** into story-mode DLC
 packs and register them automatically. This page is for players.
 
-Verified on **GTA V Legacy 1.0.3889**. Enhanced may differ; use matching
-companion tools for your build.
+Works on **GTA V Legacy** and **GTA V Enhanced**. Pool targets, NG key extract,
+and Gen8/Gen9 compatibility checks adapt to the exe you launch
+(`GTA5.exe` vs `GTA5_Enhanced.exe`).
 
 ## What you need
 
@@ -18,6 +19,21 @@ companion tools for your build.
 Without Heap + Packfile adjusters, a large `gameconfig` (many streaming stores)
 can make the map disappear or packs fail to mount. That is a game limit issue,
 not a missing vehicle file.
+
+## Enhanced: convert Gen8 → Gen9 first
+
+Most FiveM vehicle packs ship **Legacy (Gen8)** `.yft` / `.ytd` assets. On
+**Enhanced**, those must be converted to **Gen9** before use. Spawning an
+unconverted model typically triggers an immediate game stop.
+
+ZeroIV does **not** convert meshes for you. Convert with a Gen9 tool (for
+example `gtalib convert` / CodeWalker), then place the converted resource under
+`unpack-mods/`.
+
+On launch, ZeroIV scans RSC versions (`.yft`, `.ytd`, `.ydr`, `.ydd`, `.ypt`).
+If Gen8 assets are present on Enhanced (or Gen9 on Legacy), it writes
+`[compat]` lines to `ZeroIV.log` and shows a warning dialog. Disable with
+`[fivem] warnIncompatibleResources=false` if you need a quiet boot.
 
 ## Install a vehicle pack
 
@@ -38,6 +54,7 @@ not a missing vehicle file.
    - builds `mods/update/x64/dlcpacks/ziv_<name>.../dlc.rpf`
    - adds `dlcpacks:/ziv_.../` lines to `mods/update/update.rpf` → `dlclist.xml`
    - raises listed pool ceilings in `gameconfig.xml` (unless you opted out)
+   - warns if stream assets are the wrong generation for this build
 
 3. Spawn the model name from the resource (trainer / console). If the game says
    the model does not exist, the pack was not mounted — check `ZeroIV.log`.
@@ -88,9 +105,20 @@ patchGameConfig = true
 ```
 
 ZeroIV only **raises** a fixed list of model-info / streaming ceilings toward
-RDE-style targets. Values that are already higher are kept. It does not replace
-the whole XML and does not add every pool a full RDE file would add — for that,
-use mode 1.
+edition-specific targets:
+
+| Edition | Targets |
+| --- | --- |
+| Legacy | RDE-oriented ceilings (same idea as before) |
+| Enhanced | Closer to Enhanced Stock Traffic-style stores, with vehicle-stream / handling still raised for add-ons |
+
+Values that are already higher are kept (`raiseOnly`). If a previous ASI run
+wrote the **other** edition’s exact target into the archive, that value is
+pulled back (cross-edition repair) so Legacy RDE numbers do not stick on
+Enhanced.
+
+It does not replace the whole XML and does not add every pool a full community
+`gameconfig` would add — for that, use mode 1.
 
 ## `dlclist.xml`
 
@@ -131,6 +159,8 @@ patchStockUpdateRpf = false
 ; true = also auto-register traditional dlcpacks folders into dlclist
 ; FiveM resources are always scanned regardless
 registerAddonPacks = true
+; warn when Gen8 assets are on Enhanced (or Gen9 on Legacy)
+warnIncompatibleResources = true
 
 [paths]
 mods = mods
@@ -144,6 +174,7 @@ unpackMods = unpack-mods
 | `plainifyRpf` | Keep `mods/update/update.rpf` as a plaintext OPEN archive after the first conversion |
 | `patchStockUpdateRpf` | Leave `false`. Only set `true` if you intentionally want the loader to edit the Steam `update/update.rpf` instead of the `mods/` copy |
 | `registerAddonPacks` | Auto-add traditional `dlcpacks/<name>/dlc.rpf` folders to `dlclist.xml`. FiveM resources are always scanned |
+| `warnIncompatibleResources` | Warn when `.yft`/`.ytd`/… RSC versions do not match this game (Gen8 on Enhanced / Gen9 on Legacy). Default `true` |
 
 ## Check that it worked
 
@@ -152,6 +183,7 @@ Open `ZeroIV.log` after launch:
 ```
 [fivem][init] N resource(s) under ...\unpack-mods
 [fivem][init] nisa31 -> .cache/dlcpacks/ziv_nisa31... (cached|built)
+[fivem][init] addon pack carpacks (...)
 [fivem][init] N pack(s) armed for dlclist
 [fivem][gameconfig] using ...\unpack-mods\gameconfig.xml (ASI raises skipped)
 ```
@@ -159,7 +191,13 @@ Open `ZeroIV.log` after launch:
 or, without a user file:
 
 ```
-[fivem][gameconfig] ...: raise (K): MaxVehicleModelInfos ...
+[fivem][gameconfig] ...: raise (enhanced|legacy) (K): MaxVehicleModelInfos ...
+```
+
+Incompatible assets look like:
+
+```
+[fivem][compat] nisa31: stream/nisa31.yft is incompatible (version 162); needs Gen9 (Enhanced)
 ```
 
 If mounts fail, also check `PackfileLimitAdjusterEnhanced.log` and
@@ -170,10 +208,13 @@ If mounts fail, also check `PackfileLimitAdjusterEnhanced.log` and
 | Symptom | Likely cause |
 | --- | --- |
 | Model does not exist | Pack folder not under `unpack-mods/`, or game not restarted after adding it |
+| Crash / breakpoint when spawning on Enhanced | Gen8 assets not converted to Gen9 — see [Enhanced](#enhanced-convert-gen8--gen9-first) |
+| Warning dialog about incompatible resources | Same as above; details in `[compat]` log lines |
 | Map missing / world empty | Large `gameconfig` without Heap 2048 + Packfile Limit Adjuster Enhanced |
 | Only some packs work | Others still under `unpack-mods.off/` or another folder |
 | Crash while opening `stream.rpf` | Pool ceilings too low for the number of packs — use a full community `gameconfig` or keep `patchGameConfig=true` |
 | Your `gameconfig` edits vanish | Remove or rename `unpack-mods/gameconfig.xml`, or set `patchGameConfig=off` if you edit inside the RPF yourself |
+| Process hangs after quit (Wine/Proton) | Fixed in 1.2.0 (minidump skipped on Wine; fatal watchdog). Set `[config] exitTimeoutSeconds` if you need a different grace |
 
 ## Not covered here
 

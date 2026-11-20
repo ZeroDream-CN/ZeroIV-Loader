@@ -112,7 +112,11 @@ jobs:
 
             ### Highlights
             - FiveM vehicle resources under `unpack-mods/` → auto `ziv_*` DLC + `dlclist`
-            - `gameconfig.xml`: auto pool raises, or your file at `unpack-mods/gameconfig.xml`, or `patchGameConfig=off`
+            - Traditional `dlcpacks/` folders can be auto-registered (`registerAddonPacks`) with a tracked cleanup list
+            - `gameconfig.xml`: Legacy vs Enhanced pool targets; optional user file or `patchGameConfig=off`
+            - Warns when Gen8 assets are on Enhanced (or Gen9 on Legacy)
+            - Enhanced: runtime NG key extract via `magic.dat` + `ZeroIV.ngdata.bin` cache
+            - Wine/Proton: skip hanging minidumps; fatal exit watchdog
             - Pair large configs with Heap Limit Adjuster (~2048) and Packfile Limit Adjuster Enhanced
 
             Player guide: see `docs/fivem-mods.md` in the source archive or the repository.

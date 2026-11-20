@@ -2,6 +2,8 @@
 #include "i18n.h"
 
 #include <cctype>
+#include <cstdio>
+#include <string>
 
 namespace
 {
@@ -84,5 +86,65 @@ namespace i18n
 		// fullscreen boot would otherwise hide it behind the game window.
 		::MessageBoxW(nullptr, text.body, text.title,
 			MB_OK | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST);
+	}
+
+	void showIncompatibleResources(const std::vector<std::string>& packs, int fileCount)
+	{
+		init();
+		if (packs.empty() || fileCount <= 0)
+			return;
+
+		const bool zh = g_language == Lang::Chinese;
+		const bool enhanced = IsEnhanced();
+
+		auto widen = [](const std::string& utf8) -> std::wstring {
+			if (utf8.empty())
+				return {};
+			const int need = ::MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(),
+				static_cast<int>(utf8.size()), nullptr, 0);
+			if (need <= 0)
+				return std::wstring(utf8.begin(), utf8.end());
+			std::wstring out(static_cast<size_t>(need), L'\0');
+			::MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), static_cast<int>(utf8.size()),
+				out.data(), need);
+			return out;
+		};
+
+		std::wstring list;
+		const size_t shown = packs.size() < 12 ? packs.size() : 12;
+		for (size_t i = 0; i < shown; ++i)
+		{
+			if (i)
+				list += L", ";
+			list += widen(packs[i]);
+		}
+		if (packs.size() > shown)
+			list += zh ? L" 等" : L", ...";
+
+		wchar_t body[2048];
+		if (zh)
+		{
+			const wchar_t* need = enhanced
+				? L"请先用 Gen8→Gen9 转换工具处理后再进游戏，否则游戏可能会崩溃。"
+				: L"这些资源是 Enhanced (Gen9) 格式，在 Legacy 上可能无法正常使用。";
+			std::swprintf(body, sizeof(body) / sizeof(body[0]),
+				L"检测到 %d 个资源文件与当前游戏版本不兼容（涉及 %zu 个模组）：\n\n%ls\n\n%ls\n\n"
+				L"完整列表见 ZeroIV.log 中的 [compat] 行。",
+				fileCount, packs.size(), list.c_str(), need);
+			::MessageBoxW(nullptr, body, L"ZeroIV - 资源版本不兼容",
+				MB_OK | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST);
+		}
+		else
+		{
+			const wchar_t* need = enhanced
+				? L"Convert them Gen8→Gen9 before playing; spawning them can crash the game."
+				: L"These assets are Enhanced (Gen9) and may not work on Legacy.";
+			std::swprintf(body, sizeof(body) / sizeof(body[0]),
+				L"%d resource file(s) do not match this game build (%zu pack(s)):\n\n%ls\n\n%ls\n\n"
+				L"See [compat] lines in ZeroIV.log for the full list.",
+				fileCount, packs.size(), list.c_str(), need);
+			::MessageBoxW(nullptr, body, L"ZeroIV - incompatible resources",
+				MB_OK | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST);
+		}
 	}
 }
