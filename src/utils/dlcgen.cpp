@@ -1,6 +1,8 @@
 #include "main.h"
 #include "utils/dlcgen.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -31,7 +33,34 @@ namespace
 	//   6: setup2.xml is written with an order above every stock pack, so a
 	//      layout or handling definition owned by a retail DLC exists before
 	//      this pack's vehicles are registered.
-	constexpr int kGeneratorVersion = 6;
+	//   7: each stream/ directory that holds assets becomes its own nested
+	//      RPF (sibling under %PLATFORM%), so multiple `_manifest.ymf` files
+	//      survive; map packs get CONTENT_FLAG_MAP_RESOURCE.
+	//   8: skip packaging `_manifest.ymf`. Story-mode DLC mount of a stream
+	//      RPF that carries CPackFileMetaData null-calls inside the engine
+	//      (GTA5+0x941701); FiveM loads those manifests itself, SP does not.
+	//   9: skip stream/lodlights (and *lodlights* / *distlodlights* ymaps).
+	//      Incomplete stock LOD-light replacements are a common story-mode
+	//      crash during world metadata load (GTA5+0x654B44).
+	//  10: for this_is_a_map packs, also skip vanilla-named map overrides
+	//      (apa_/bt1_/ss1_/hei_/v_carmod/…); keep ajaxon_* and gtaprops only.
+	//  11: map packs no longer keep gtaprops/ or vw_/xs_ DLC prop dumps —
+	//      re-registering those ytyps under CONTENT_FLAG_MAP_RESOURCE AVs
+	//      during city metadata load (GTA5+0x653C8F). Custom ajaxon_* only.
+	//  12: map packs skip *.ymap, INTERIOR_PROXY_ORDER_FILE, and
+	//      CONTENT_FLAG_MAP_RESOURCE. Custom milo ymaps still AV at the same
+	//      city-metadata site without matching exterior replacements; ship
+	//      drawables/cols/ytyp only until placement is safe.
+	//  13: (reverted) temporary unmount of map packs for isolation.
+	//  14: map packs use the verified SP layout: LEVEL_PACK + isLevelPack,
+	//      map_props.rpf (models/ytyp) + map_meta.rpf (ymap/ybn/ymf with
+	//      CONTENTS_DLC_MAP_DATA), GROUP_UPDATE_STREAMING + $level=MO_JIM_L11.
+	//      Vehicle-style flat stream RPFs were the city-metadata AV cause.
+	constexpr int kGeneratorVersion = 14;
+
+	// Relative paths inside the pack device for story-mode map archives.
+	const char* kMapPropsArchive = "levels/gta5/props/map_props.rpf";
+	const char* kMapMetaArchive = "levels/gta5/props/map_meta.rpf";
 
 	// The sequence number written to setup2.xml's <order>.
 	//
@@ -47,18 +76,13 @@ namespace
 	// complete set of retail definitions.
 	constexpr int kDlcOrder = 100;
 
-	// The archive that carries the streamed assets, under %PLATFORM%.
-	//
-	// The name is arbitrary -- the engine mounts whatever content.xml declares --
-	// so it is deliberately generic. resources here are not always vehicles: a
-	// map or a prop pack streams exactly the same way, and calling its archive
-	// vehicles.rpf only misleads whoever opens the cache folder.
-	//
-	// What does matter is that the assets sit at the *root* of this archive. A
-	// streaming object is identified by its path relative to the packfile, so
-	// `stream/nisa31.yft` registers under that whole name and never answers a
-	// lookup for `nisa31`.
-	const char* kStreamArchive = "stream.rpf";
+	// Bucket for assets that sit directly under stream/ (or outside stream/).
+	// Nested folders get reversible escaped names instead; see bucket_name().
+	const char* kRootStreamBucket = "stream";
+
+	// Soft cap on the escaped bucket stem before we fall back to a hash name.
+	// Keeps the RPF TOC name table small on deep FiveM trees.
+	constexpr size_t kMaxBucketStem = 48;
 
 	constexpr size_t npos = std::string::npos;
 
@@ -109,6 +133,111 @@ namespace
 			return "VEHICLE_SHOP_FILE";
 		return type;
 	}
+
+	// FNV-1a 32-bit over the UTF-8 path; used when an escaped bucket name is too
+	// long or collides after sanitising illegal filename characters.
+	uint32_t path_hash32(const std::string& text)
+	{
+		uint32_t hash = 2166136261u;
+		for (unsigned char c : text)
+		{
+			hash ^= c;
+			hash *= 16777619u;
+		}
+		return hash;
+	}
+
+	// One path segment: '_' doubles so a later join on '_' stays reversible
+	// (`ymap_part1` vs `ymap/part1` -> `ymap__part1` vs `ymap_part1`).
+	std::string escape_segment(const std::string& segment)
+	{
+		std::string out;
+		out.reserve(segment.size() * 2);
+		for (unsigned char c : segment)
+		{
+			if (c == '_')
+			{
+				out += "__";
+				continue;
+			}
+			if (std::isalnum(c) || c == '-')
+			{
+				out.push_back(static_cast<char>(c));
+				continue;
+			}
+			out.push_back('_');
+		}
+		return out;
+	}
+
+	// Relative directory under stream/ ("" for the stream root) -> bucket stem
+	// without the `.rpf` suffix. Empty / root always maps to kRootStreamBucket.
+	std::string bucket_stem_from_rel_dir(const std::string& relDir)
+	{
+		if (relDir.empty() || relDir == ".")
+			return kRootStreamBucket;
+
+		std::string stem;
+		size_t begin = 0;
+		while (begin <= relDir.size())
+		{
+			size_t end = relDir.find('/', begin);
+			if (end == npos)
+				end = relDir.size();
+			const std::string part = relDir.substr(begin, end - begin);
+			if (!part.empty() && part != ".")
+			{
+				const std::string escaped = escape_segment(part);
+				if (!escaped.empty())
+				{
+					if (!stem.empty())
+						stem.push_back('_');
+					stem += escaped;
+				}
+			}
+			if (end == relDir.size())
+				break;
+			begin = end + 1;
+		}
+
+		if (stem.empty())
+			return kRootStreamBucket;
+		if (stem.size() > kMaxBucketStem)
+		{
+			char hex[16];
+			std::snprintf(hex, sizeof(hex), "s_%08x", path_hash32(relDir));
+			return hex;
+		}
+		return stem;
+	}
+
+	// Parent directory of a resource-relative asset path, expressed relative to
+	// stream/. Assets outside stream/ join the root bucket (same as today).
+	std::string stream_rel_dir_for_asset(const std::string& asset)
+	{
+		const std::string lower = lower_copy(asset);
+		const std::string prefix = "stream/";
+		std::string under;
+		if (lower.rfind(prefix, 0) == 0)
+			under = asset.substr(prefix.size());
+		else if (lower == "stream")
+			return {};
+		else
+			return {}; // not under stream/ -> root bucket
+
+		const size_t slash = under.find_last_of('/');
+		if (slash == npos)
+			return {}; // file directly under stream/
+		return under.substr(0, slash);
+	}
+
+	struct StreamBucket
+	{
+		std::string stem;       // without .rpf
+		std::string archive;    // stem + ".rpf"
+		std::string sourceDir;  // stream-relative dir for logs ("" = stream root)
+		size_t fileCount = 0;
+	};
 
 	// Hard links keep the staging tree from being a second full copy of the
 	// resource. The unpack tree and the cache normally share a volume; a copy
@@ -381,7 +510,7 @@ namespace
 		}
 	}
 
-	std::string build_setup2(const std::string& pack)
+	std::string build_setup2(const std::string& pack, bool isMap)
 	{
 		std::ostringstream xml;
 		xml << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
@@ -391,21 +520,50 @@ namespace
 		xml << "  <timeStamp>" << timestamp() << "</timeStamp>\n";
 		xml << "  <nameHash>" << xml_escape(pack) << "</nameHash>\n";
 		xml << "  <contentChangeSetGroups>\n";
-		xml << "    <Item>\n";
-		xml << "      <NameHash>GROUP_STARTUP</NameHash>\n";
-		xml << "      <ContentChangeSets>\n";
-		xml << "        <Item>" << xml_escape(pack) << "_AUTOGEN</Item>\n";
-		xml << "      </ContentChangeSets>\n";
-		xml << "    </Item>\n";
+		if (isMap)
+		{
+			// Data metas (interiorproxies) at startup; map RPFs when the SP
+			// level streams — matches verified LEVEL_PACK map add-ons.
+			xml << "    <Item>\n";
+			xml << "      <NameHash>GROUP_STARTUP</NameHash>\n";
+			xml << "      <ContentChangeSets>\n";
+			xml << "        <Item>" << xml_escape(pack) << "_AUTOGEN</Item>\n";
+			xml << "      </ContentChangeSets>\n";
+			xml << "    </Item>\n";
+			xml << "    <Item>\n";
+			xml << "      <NameHash>GROUP_UPDATE_STREAMING</NameHash>\n";
+			xml << "      <ContentChangeSets>\n";
+			xml << "        <Item>CCS_" << xml_escape(pack) << "_NG_STREAMING_MAP</Item>\n";
+			xml << "      </ContentChangeSets>\n";
+			xml << "    </Item>\n";
+		}
+		else
+		{
+			xml << "    <Item>\n";
+			xml << "      <NameHash>GROUP_STARTUP</NameHash>\n";
+			xml << "      <ContentChangeSets>\n";
+			xml << "        <Item>" << xml_escape(pack) << "_AUTOGEN</Item>\n";
+			xml << "      </ContentChangeSets>\n";
+			xml << "    </Item>\n";
+		}
 		xml << "  </contentChangeSetGroups>\n";
-		xml << "  <type>EXTRACONTENT_COMPAT_PACK</type>\n";
-		xml << "  <order value=\"" << kDlcOrder << "\" />\n";
+		if (isMap)
+		{
+			xml << "  <type>EXTRACONTENT_LEVEL_PACK</type>\n";
+			xml << "  <order value=\"" << kDlcOrder << "\" />\n";
+			xml << "  <isLevelPack value=\"true\" />\n";
+		}
+		else
+		{
+			xml << "  <type>EXTRACONTENT_COMPAT_PACK</type>\n";
+			xml << "  <order value=\"" << kDlcOrder << "\" />\n";
+		}
 		xml << "</SSetupData>\n";
 		return xml.str();
 	}
 
 	std::string build_content(const std::string& pack, const std::vector<StagedDataFile>& dataFiles,
-		bool hasStream)
+		const std::vector<std::string>& streamArchives)
 	{
 		const std::string device = "dlc_" + pack;
 
@@ -429,11 +587,11 @@ namespace
 			xml << "    </Item>\n";
 		}
 
-		if (hasStream)
+		for (const auto& archive : streamArchives)
 		{
 			xml << "    <Item>\n";
 			xml << "      <filename>" << xml_escape(device) << ":/%PLATFORM%/"
-				<< kStreamArchive << "</filename>\n";
+				<< xml_escape(archive) << "</filename>\n";
 			xml << "      <fileType>RPF_FILE</fileType>\n";
 			xml << "      <overlay value=\"false\" />\n";
 			xml << "      <disabled value=\"true\" />\n";
@@ -451,9 +609,9 @@ namespace
 		for (const auto& file : dataFiles)
 			xml << "        <Item>" << xml_escape(device) << ":/" << xml_escape(file.name)
 				<< "</Item>\n";
-		if (hasStream)
+		for (const auto& archive : streamArchives)
 			xml << "        <Item>" << xml_escape(device) << ":/%PLATFORM%/"
-				<< kStreamArchive << "</Item>\n";
+				<< xml_escape(archive) << "</Item>\n";
 
 		xml << "      </filesToEnable>\n";
 		xml << "      <txdToLoad />\n";
@@ -465,6 +623,134 @@ namespace
 		xml << "  <patchFiles />\n";
 		xml << "</CDataFileMgr__ContentsOfDataFileXml>\n";
 		return xml.str();
+	}
+
+	// Story-mode map DLC: props RPF (models+ytyp) + meta RPF (ymap/ybn/ymf)
+	// tagged CONTENTS_DLC_MAP_DATA, enabled under $level=MO_JIM_L11.
+	std::string build_content_map(const std::string& pack,
+		const std::vector<StagedDataFile>& dataFiles,
+		const std::vector<std::string>& itypRequests,
+		bool haveProps, bool haveMeta)
+	{
+		const std::string device = "dlc_" + pack;
+		const std::string propsPath = std::string(device) + ":/%PLATFORM%/" + kMapPropsArchive;
+		const std::string metaPath = std::string(device) + ":/%PLATFORM%/" + kMapMetaArchive;
+
+		std::ostringstream xml;
+		xml << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+		xml << "<CDataFileMgr__ContentsOfDataFileXml>\n";
+		xml << "  <disabledFiles />\n";
+		xml << "  <includedXmlFiles />\n";
+		xml << "  <includedDataFiles />\n";
+		xml << "  <dataFiles>\n";
+
+		for (const auto& file : dataFiles)
+		{
+			xml << "    <Item>\n";
+			xml << "      <filename>" << xml_escape(device) << ":/" << xml_escape(file.name)
+				<< "</filename>\n";
+			xml << "      <fileType>" << xml_escape(file.type) << "</fileType>\n";
+			xml << "      <overlay value=\"false\" />\n";
+			xml << "      <disabled value=\"true\" />\n";
+			xml << "      <persistent value=\"false\" />\n";
+			xml << "    </Item>\n";
+		}
+
+		if (haveProps)
+		{
+			xml << "    <Item>\n";
+			xml << "      <filename>" << xml_escape(propsPath) << "</filename>\n";
+			xml << "      <fileType>RPF_FILE</fileType>\n";
+			xml << "      <overlay value=\"false\" />\n";
+			xml << "      <disabled value=\"false\" />\n";
+			xml << "      <persistent value=\"false\" />\n";
+			xml << "    </Item>\n";
+		}
+		if (haveMeta)
+		{
+			xml << "    <Item>\n";
+			xml << "      <filename>" << xml_escape(metaPath) << "</filename>\n";
+			xml << "      <fileType>RPF_FILE</fileType>\n";
+			xml << "      <overlay value=\"false\" />\n";
+			xml << "      <disabled value=\"false\" />\n";
+			xml << "      <persistent value=\"false\" />\n";
+			xml << "      <contents>CONTENTS_DLC_MAP_DATA</contents>\n";
+			xml << "    </Item>\n";
+		}
+		for (const auto& ityp : itypRequests)
+		{
+			xml << "    <Item>\n";
+			xml << "      <filename>" << xml_escape(propsPath) << "/" << xml_escape(ityp)
+				<< "</filename>\n";
+			xml << "      <fileType>DLC_ITYP_REQUEST</fileType>\n";
+			xml << "      <overlay value=\"false\" />\n";
+			xml << "      <disabled value=\"true\" />\n";
+			xml << "      <persistent value=\"true\" />\n";
+			xml << "    </Item>\n";
+		}
+
+		xml << "  </dataFiles>\n";
+		xml << "  <contentChangeSets>\n";
+		xml << "    <Item>\n";
+		xml << "      <changeSetName>" << xml_escape(pack) << "_AUTOGEN</changeSetName>\n";
+		xml << "      <filesToDisable />\n";
+		xml << "      <filesToEnable>\n";
+		for (const auto& file : dataFiles)
+			xml << "        <Item>" << xml_escape(device) << ":/" << xml_escape(file.name)
+				<< "</Item>\n";
+		xml << "      </filesToEnable>\n";
+		xml << "      <txdToLoad />\n";
+		xml << "      <txdToUnload />\n";
+		xml << "      <residentResources />\n";
+		xml << "      <unregisterResources />\n";
+		xml << "    </Item>\n";
+		xml << "    <Item>\n";
+		xml << "      <changeSetName>CCS_" << xml_escape(pack)
+			<< "_NG_STREAMING_MAP</changeSetName>\n";
+		xml << "      <filesToDisable />\n";
+		xml << "      <filesToEnable>\n";
+		if (haveProps)
+			xml << "        <Item>" << xml_escape(propsPath) << "</Item>\n";
+		if (haveMeta)
+			xml << "        <Item>" << xml_escape(metaPath) << "</Item>\n";
+		for (const auto& ityp : itypRequests)
+			xml << "        <Item>" << xml_escape(propsPath) << "/" << xml_escape(ityp)
+				<< "</Item>\n";
+		xml << "      </filesToEnable>\n";
+		xml << "      <txdToLoad />\n";
+		xml << "      <txdToUnload />\n";
+		xml << "      <residentResources />\n";
+		xml << "      <unregisterResources />\n";
+		xml << "      <executionConditions>\n";
+		xml << "        <activeChangesetConditions>\n";
+		xml << "        </activeChangesetConditions>\n";
+		xml << "        <genericConditions>$level=MO_JIM_L11</genericConditions>\n";
+		xml << "      </executionConditions>\n";
+		xml << "    </Item>\n";
+		xml << "  </contentChangeSets>\n";
+		xml << "  <patchFiles />\n";
+		xml << "</CDataFileMgr__ContentsOfDataFileXml>\n";
+		return xml.str();
+	}
+
+	// .ymap/.ybn/_manifest.ymf → map_meta; models+ytyp → map_props; lodlights skip.
+	enum class MapAssetBucket { Props, Meta, Skip };
+
+	MapAssetBucket classify_map_asset(const std::string& relDir, const std::string& baseLower)
+	{
+		if (relDir == "lodlights" ||
+			baseLower.find("lodlights") != npos ||
+			baseLower.find("distlodlights") != npos)
+			return MapAssetBucket::Skip;
+
+		const size_t dot = baseLower.rfind('.');
+		const std::string ext = (dot == npos) ? std::string() : baseLower.substr(dot);
+		if (ext == ".ymap" || ext == ".ybn" || ext == ".ymf")
+			return MapAssetBucket::Meta;
+		if (ext == ".ydr" || ext == ".ydd" || ext == ".yft" || ext == ".ytd" ||
+			ext == ".ytyp")
+			return MapAssetBucket::Props;
+		return MapAssetBucket::Props;
 	}
 
 	std::string read_stamp(const fs::path& path)
@@ -636,6 +922,10 @@ namespace dlcgen
 
 		std::vector<StagedDataFile> stagedFiles;
 		std::set<std::string> usedNames;
+		std::vector<std::string> itypRequests;
+		std::vector<std::string> streamArchives;
+		bool haveMapProps = false;
+		bool haveMapMeta = false;
 
 		for (const auto& file : resource.dataFiles)
 		{
@@ -649,6 +939,15 @@ namespace dlcgen
 
 			const std::string type = map_file_type(file.type);
 			const std::string relative = file.path;
+
+			// Map packs: ytyps live inside map_props.rpf and are requested from
+			// content.xml — do not also stage a loose DLC_ITYP_REQUEST copy.
+			if (resource.isMap && _stricmp(type.c_str(), "DLC_ITYP_REQUEST") == 0)
+			{
+				logger::write("fivem", "[gen] %s: deferring %s to map_props DLC_ITYP_REQUEST",
+					resource.name.c_str(), file.path.c_str());
+				continue;
+			}
 
 			// DLC_ITYP_REQUEST is resolved through content.xml against the pack
 			// device, so the typ has to keep a real path inside the archive.
@@ -668,33 +967,189 @@ namespace dlcgen
 				stagedFiles.push_back({ type, target });
 		}
 
-		// Streamed assets are flattened into the archive root; see kStreamArchive
-		// for why the prefix has to go and why the name is generic.
-		const fs::path streamRoot = stage / "x64" / kStreamArchive;
-		std::set<std::string> usedAssets;
-		bool hasStream = false;
-		for (const auto& asset : resource.assets)
+		if (resource.isMap)
 		{
-			const fs::path source = resource.dir / fs::path(asset);
-			if (!fs::is_regular_file(source, ec))
-				continue;
+			// Verified SP map layout: models+ytyp in map_props.rpf; ymap/ybn/
+			// _manifest.ymf in map_meta.rpf with CONTENTS_DLC_MAP_DATA. Lodlights
+			// still skipped — incomplete night-light replacements AV on SP.
+			std::set<std::string> usedProps;
+			std::set<std::string> usedMeta;
+			size_t propsCount = 0;
+			size_t metaCount = 0;
+			const fs::path propsRoot = stage / "x64" / fs::path(kMapPropsArchive);
+			const fs::path metaRoot = stage / "x64" / fs::path(kMapMetaArchive);
 
-			const std::string basename = fs::path(asset).filename().string();
-			if (basename.empty())
-				continue;
-			if (!usedAssets.insert(lower_copy(basename)).second)
+			for (const auto& asset : resource.assets)
 			{
-				logger::write("fivem", "[gen] %s: %s and an earlier file share the name %s; "
-					"keeping the first", resource.name.c_str(), asset.c_str(), basename.c_str());
-				continue;
+				const fs::path source = resource.dir / fs::path(asset);
+				if (!fs::is_regular_file(source, ec))
+					continue;
+
+				const std::string basename = fs::path(asset).filename().string();
+				if (basename.empty())
+					continue;
+
+				const std::string relDir = stream_rel_dir_for_asset(asset);
+				const std::string baseLower = lower_copy(basename);
+				const MapAssetBucket bucket = classify_map_asset(relDir, baseLower);
+				if (bucket == MapAssetBucket::Skip)
+				{
+					logger::write("fivem", "[gen] %s: skipping %s (lodlights unsafe in story mode)",
+						resource.name.c_str(), asset.c_str());
+					continue;
+				}
+
+				std::set<std::string>& used =
+					(bucket == MapAssetBucket::Meta) ? usedMeta : usedProps;
+				if (!used.insert(baseLower).second)
+				{
+					logger::write("fivem", "[gen] %s: %s duplicates %s; keeping the first",
+						resource.name.c_str(), asset.c_str(), basename.c_str());
+					continue;
+				}
+
+				const fs::path target = (bucket == MapAssetBucket::Meta)
+					? (metaRoot / basename)
+					: (propsRoot / basename);
+				if (!stage_file(source, target))
+					continue;
+
+				if (bucket == MapAssetBucket::Meta)
+					++metaCount;
+				else
+				{
+					++propsCount;
+					if (baseLower.size() >= 5 &&
+						baseLower.compare(baseLower.size() - 5, 5, ".ytyp") == 0)
+						itypRequests.push_back(basename);
+				}
 			}
 
-			if (!stage_file(source, streamRoot / fs::path(basename)))
-				continue;
-			hasStream = true;
+			haveMapProps = propsCount > 0;
+			haveMapMeta = metaCount > 0;
+			if (haveMapProps)
+			{
+				streamArchives.push_back(kMapPropsArchive);
+				logger::write("fivem", "[gen] %s: %s <- props (%zu file(s), %zu ytyp)",
+					resource.name.c_str(), kMapPropsArchive, propsCount, itypRequests.size());
+			}
+			if (haveMapMeta)
+			{
+				streamArchives.push_back(kMapMetaArchive);
+				logger::write("fivem", "[gen] %s: %s <- meta (%zu file(s))",
+					resource.name.c_str(), kMapMetaArchive, metaCount);
+			}
+		}
+		else
+		{
+			// One nested RPF per stream/ directory that directly holds assets.
+			// Files are flattened to that RPF's root so streaming names stay
+			// basenames. Vehicles never ship `_manifest.ymf`.
+			std::unordered_map<std::string, StreamBucket> buckets;
+			std::unordered_map<std::string, std::string> stemByRelDir;
+			std::set<std::string> usedStems;
+			std::unordered_map<std::string, std::set<std::string>> usedInBucket;
+			std::unordered_map<std::string, std::string> basenameOwner;
+
+			auto ensure_bucket = [&](const std::string& relDir) -> StreamBucket&
+			{
+				auto found = stemByRelDir.find(relDir);
+				if (found != stemByRelDir.end())
+					return buckets[found->second];
+
+				std::string stem = bucket_stem_from_rel_dir(relDir);
+				if (!usedStems.insert(lower_copy(stem)).second)
+				{
+					char hex[16];
+					std::snprintf(hex, sizeof(hex), "%s_%06x", stem.c_str(),
+						path_hash32(relDir) & 0xFFFFFFu);
+					stem = hex;
+					if (stem.size() > kMaxBucketStem + 16)
+					{
+						std::snprintf(hex, sizeof(hex), "s_%08x", path_hash32(relDir));
+						stem = hex;
+					}
+					usedStems.insert(lower_copy(stem));
+				}
+
+				StreamBucket bucket;
+				bucket.stem = stem;
+				bucket.archive = stem + ".rpf";
+				bucket.sourceDir = relDir;
+				buckets.emplace(stem, bucket);
+				stemByRelDir.emplace(relDir, stem);
+				return buckets[stem];
+			};
+
+			for (const auto& asset : resource.assets)
+			{
+				const fs::path source = resource.dir / fs::path(asset);
+				if (!fs::is_regular_file(source, ec))
+					continue;
+
+				const std::string basename = fs::path(asset).filename().string();
+				if (basename.empty())
+					continue;
+
+				if (_stricmp(basename.c_str(), "_manifest.ymf") == 0)
+				{
+					logger::write("fivem", "[gen] %s: skipping %s (not used for vehicles)",
+						resource.name.c_str(), asset.c_str());
+					continue;
+				}
+
+				const std::string relDir = stream_rel_dir_for_asset(asset);
+				StreamBucket& bucket = ensure_bucket(relDir);
+				std::set<std::string>& usedHere = usedInBucket[bucket.stem];
+				const std::string baseKey = lower_copy(basename);
+				if (!usedHere.insert(baseKey).second)
+				{
+					logger::write("fivem", "[gen] %s: %s and an earlier file in %s share the "
+						"name %s; keeping the first", resource.name.c_str(), asset.c_str(),
+						bucket.archive.c_str(), basename.c_str());
+					continue;
+				}
+
+				auto owner = basenameOwner.find(baseKey);
+				if (owner != basenameOwner.end() && owner->second != bucket.stem)
+				{
+					logger::write("fivem", "[gen] %s: %s also appears in %s.rpf; later mount wins",
+						resource.name.c_str(), basename.c_str(), owner->second.c_str());
+				}
+				else
+					basenameOwner.emplace(baseKey, bucket.stem);
+
+				const fs::path target = stage / "x64" / bucket.archive / basename;
+				if (!stage_file(source, target))
+					continue;
+
+				++bucket.fileCount;
+			}
+
+			std::vector<std::string> stems;
+			stems.reserve(buckets.size());
+			for (const auto& entry : buckets)
+				stems.push_back(entry.first);
+			std::sort(stems.begin(), stems.end(), [&](const std::string& a, const std::string& b) {
+				if (a == kRootStreamBucket)
+					return b != kRootStreamBucket;
+				if (b == kRootStreamBucket)
+					return false;
+				return lower_copy(a) < lower_copy(b);
+			});
+			for (const auto& stem : stems)
+			{
+				const StreamBucket& bucket = buckets[stem];
+				if (bucket.fileCount == 0)
+					continue;
+				streamArchives.push_back(bucket.archive);
+				const char* dirLabel = bucket.sourceDir.empty() ? "stream/" : bucket.sourceDir.c_str();
+				logger::write("fivem", "[gen] %s: %s <- %s (%zu file(s))",
+					resource.name.c_str(), bucket.archive.c_str(), dirLabel, bucket.fileCount);
+			}
 		}
 
-		if (stagedFiles.empty() && !hasStream)
+		if (stagedFiles.empty() && streamArchives.empty())
 		{
 			error = "nothing to package (no data files and no streamed assets)";
 			return BuildResult::Failed;
@@ -704,9 +1159,11 @@ namespace dlcgen
 		// is worth a line here even though it does not stop the build.
 		check_layout_refs(resource.name, stage, stagedFiles);
 
-		if (!write_text(stage / "setup2.xml", build_setup2(resource.pack)) ||
-			!write_text(stage / "content.xml",
-				build_content(resource.pack, stagedFiles, hasStream)))
+		const std::string contentXml = resource.isMap
+			? build_content_map(resource.pack, stagedFiles, itypRequests, haveMapProps, haveMapMeta)
+			: build_content(resource.pack, stagedFiles, streamArchives);
+		if (!write_text(stage / "setup2.xml", build_setup2(resource.pack, resource.isMap)) ||
+			!write_text(stage / "content.xml", contentXml))
 		{
 			error = "cannot write setup2.xml/content.xml under " + stage.string();
 			return BuildResult::Failed;

@@ -16,11 +16,12 @@
 //     setup2.xml
 //     content.xml
 //     data/<data_file basenames>
-//     x64/stream.rpf/<streamed assets at the root>
+//     x64/<bucket>.rpf/<streamed assets at each archive root>
 //
-// The streaming objects must sit at the archive root: an object is identified by
-// its path relative to the packfile, so a `stream/` or `vehicles/` prefix would
-// register the model under that name and the game would never find it.
+// Each directory under stream/ that directly holds assets becomes its own nested
+// RPF (sibling under %PLATFORM%), so multiple `_manifest.ymf` files survive.
+// Assets are still flattened to that RPF's root: streaming objects are identified
+// by path relative to the packfile, so a `ybn/` prefix would never match `bt1_02_0`.
 //
 // The archive is produced by loosepack, which already knows how to turn a
 // directory tree into an RPF7 and how to nest a directory named *.rpf.
@@ -31,6 +32,7 @@ namespace dlcgen
 		Built,
 		Reused,
 		Failed,
+		Skipped, // intentionally not published (e.g. map pack isolation)
 	};
 
 	// Generates (or reuses) the DLC for one resource and publishes it into the

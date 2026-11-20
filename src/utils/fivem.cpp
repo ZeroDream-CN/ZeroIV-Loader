@@ -249,7 +249,7 @@ namespace
 	bool is_asset_ext(const std::string& ext)
 	{
 		static const char* kExts[] = {
-			".yft", ".ytd", ".ydr", ".ybn", ".ytyp", ".ymap", ".yed", ".yfd",
+			".yft", ".ytd", ".ydr", ".ydd", ".ybn", ".ytyp", ".ymap", ".yed", ".yfd",
 			".yld", ".ycd", ".ypt", ".ynv", ".yvr", ".ymf", ".ygr", ".ycs",
 			".ybd", ".awc",
 		};
@@ -907,6 +907,11 @@ namespace fivem
 			if (result == dlcgen::BuildResult::Failed)
 			{
 				logger::write("fivem", "[init] %s: %s", resource.name.c_str(), error.c_str());
+				continue;
+			}
+			if (result == dlcgen::BuildResult::Skipped)
+			{
+				logger::write("fivem", "[init] %s: skipped (not published)", resource.name.c_str());
 				continue;
 			}
 
