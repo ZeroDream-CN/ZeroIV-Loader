@@ -36,6 +36,9 @@ namespace
 
 	std::mutex g_mutex;
 	std::vector<std::string> g_packs;
+	std::set<std::string> g_prune_addons;     // "dlcpacks:/name/"
+	std::set<std::string> g_claimable_addons; // "dlcpacks:/name/"
+	std::vector<std::string> g_claimed_addons; // pack names inserted this Prepare
 
 	fs::path stock_path()
 	{
@@ -242,6 +245,40 @@ namespace
 		return _strnicmp(entry.c_str(), prefix.c_str(), prefix.size()) == 0;
 	}
 
+	std::string pack_item(const std::string& pack)
+	{
+		return "dlcpacks:/" + pack + "/";
+	}
+
+	// Pack folder name from a dlclist item ("dlcpacks:/carpacks/" -> "carpacks").
+	std::string pack_name_from_item(const std::string& item)
+	{
+		static const std::string prefix = "dlcpacks:/";
+		if (item.size() <= prefix.size() ||
+			_strnicmp(item.c_str(), prefix.c_str(), prefix.size()) != 0)
+			return {};
+		const size_t start = prefix.size();
+		size_t end = item.find('/', start);
+		if (end == npos)
+			end = item.size();
+		return item.substr(start, end - start);
+	}
+
+	bool item_equals_ci(const std::string& a, const std::string& b)
+	{
+		if (a.size() != b.size())
+			return false;
+		return _strnicmp(a.c_str(), b.c_str(), a.size()) == 0;
+	}
+
+	bool set_contains_ci(const std::set<std::string>& items, const std::string& value)
+	{
+		for (const auto& item : items)
+			if (item_equals_ci(item, value))
+				return true;
+		return false;
+	}
+
 	// Brings dlclist.xml in line with the generated packs: entries for packs that
 	// no longer exist are dropped, missing ones are appended.
 	//
@@ -249,8 +286,13 @@ namespace
 	// archive that is gone on every start, and a failed mount of a pack listed in
 	// dlclist can abort the whole mount pass, which makes *every* pack unavailable
 	// rather than just the missing one.
+	//
+	// Traditional (non-ziv_) lines are only removed when listed in `pruneAddons`
+	// — packs this loader previously auto-registered that are gone from disk.
+	// Hand-edited entries are never touched.
 	std::string build_patched(const std::string& original, const std::vector<std::string>& packs,
-		int& added, int& removed, std::string& error)
+		const std::set<std::string>& pruneAddons, const std::set<std::string>& claimableAddons,
+		std::vector<std::string>& claimedAddons, int& added, int& removed, std::string& error)
 	{
 		size_t close = rfind_ci(original, "</Paths>");
 		if (close == npos)
@@ -264,12 +306,14 @@ namespace
 		std::set<std::string> wanted;
 		for (const auto& pack : packs)
 			if (!pack.empty())
-				wanted.insert("dlcpacks:/" + pack + "/");
+				wanted.insert(pack_item(pack));
 
 		// Walk the <Item> lines, keeping every one that is not a generated pack, or
-		// that is a generated pack still on disk.
+		// that is a generated pack still on disk; drop tracked traditional packs
+		// that disappeared from disk.
 		added = 0;
 		removed = 0;
+		claimedAddons.clear();
 		const std::string openTag = "<Item>";
 		const std::string closeTag = "</Item>";
 		std::string kept;
@@ -293,8 +337,9 @@ namespace
 
 			const std::string value = trim(original.substr(valueStart, end - valueStart));
 			const bool generated = is_generated_pack(value);
-			const bool keep = !generated || wanted.count(value) > 0;
-			if (generated && !keep)
+			const bool managedGone = set_contains_ci(pruneAddons, value);
+			const bool keep = (!generated || set_contains_ci(wanted, value)) && !managedGone;
+			if (!keep)
 			{
 				// Drop the whole line, including its indentation and line break.
 				size_t lineStart = kept.size();
@@ -321,6 +366,12 @@ namespace
 				continue;
 			insert += "\t\t<Item>" + item + "</Item>\r\n";
 			++added;
+			if (set_contains_ci(claimableAddons, item))
+			{
+				const std::string name = pack_name_from_item(item);
+				if (!name.empty())
+					claimedAddons.push_back(name);
+			}
 		}
 
 		if (added == 0 && removed == 0)
@@ -456,79 +507,93 @@ namespace
 	// stream.rpf). Cutting it back to stock overflows the pool, which does not
 	// fail one pack -- archive registration collapses, the map stops streaming
 	// entirely and no DLC vehicle can be spawned.
+	// Per-edition ceilings. Legacy targets stay on the previous ASI table
+	// (RDE-oriented). Enhanced targets follow "GTAV Enhanced Config V3" Stock
+	// Traffic, with the vehicle-stream / handling raises kept for add-on packs.
+	// Stock columns are retail baselines for documentation / revert tooling.
 	struct Limit
 	{
 		const char* tag;
-		uint64_t target;
-		uint64_t stock;
+		uint64_t legacyTarget;
+		uint64_t enhancedTarget;
+		uint64_t legacyStock;
+		uint64_t enhancedStock;
 	};
 
-	// Targets match pnwparksfan/gameconfig versions/3889 (RDE-synced). Stock is
-	// retail update.rpf for the same build. Verified working with the full RDE
-	// XML in mods/update/update.rpf plus HeapAdjuster 2048 and
-	// PackfileLimitAdjusterEnhanced. raiseOnly keeps any higher value already
-	// in the archive (e.g. a wholesale RDE replace).
+	uint64_t limit_target(const Limit& limit)
+	{
+		return IsEnhanced() ? limit.enhancedTarget : limit.legacyTarget;
+	}
+
+	// The other edition's ASI target. Used to pull back a value this loader
+	// previously wrote under the wrong edition (raiseOnly would otherwise keep
+	// Legacy RDE numbers forever on Enhanced).
+	uint64_t limit_other_target(const Limit& limit)
+	{
+		return IsEnhanced() ? limit.legacyTarget : limit.enhancedTarget;
+	}
 
 	// <Tag value="N"/> form, used by ConfigModelInfo and ConfigStreamingEngine.
 	const Limit kAttributeLimits[] = {
-		{ "MaxVehicleModelInfos", 5000, 320 },
-		{ "MaxExtraVehicleModelInfos", 5225, 640 },
-		{ "MaxPedModelInfos", 5000, 725 },
-		{ "MaxExtraPedModelInfos", 5250, 440 },
-		{ "MaxWeaponModelInfos", 5000, 115 },
-		{ "MaxExtraWeaponModelInfos", 5130, 610 },
-		{ "MaxMloModelInfos", 5000, 220 },
-		{ "MaxMloInstances", 28000, 18000 },
-		{ "ArchiveCount", 6024, 4440 },
+		{ "MaxVehicleModelInfos", 5000, 18320, 320, 18320 },
+		{ "MaxExtraVehicleModelInfos", 5225, 18630, 640, 18630 },
+		{ "MaxPedModelInfos", 5000, 18000, 725, 18000 },
+		{ "MaxExtraPedModelInfos", 5250, 1430, 440, 1430 },
+		{ "MaxWeaponModelInfos", 5000, 12115, 115, 12115 },
+		{ "MaxExtraWeaponModelInfos", 5130, 12610, 610, 12610 },
+		{ "MaxMloModelInfos", 5000, 25000, 220, 25000 },
+		{ "MaxMloInstances", 28000, 36000, 18000, 36000 },
+		{ "ArchiveCount", 6024, 25104, 4440, 25104 },
 	};
 
 	// <PoolName>X</PoolName><PoolSize value="N"/> form, inside PoolSizes.
-	// Streaming stores follow RDE. Skipped when unpack-mods/gameconfig.xml exists
-	// or when [fivem] patchGameConfig=off.
+	// Skipped when unpack-mods/gameconfig.xml exists or patchGameConfig=off.
 	const Limit kPoolLimits[] = {
-		{ "Vehicles", 300, 300 },
-		{ "VehicleStreamRequest", 240, 60 },
-		{ "VehicleStreamRender", 240, 100 },
-		{ "VehicleStruct", 600, 200 },
-		{ "HandlingData", 5450, 1800 },
-		{ "carrec", 5500, 4000 },
-		{ "MetaDataStore", 6200, 3200 },
-		{ "FragmentStore", 299000, 42000 },
-		{ "fwArchetypePooledMap", 65521, 64000 },
-		{ "fwDynamicArchetypeComponent", 65521, 16384 },
-		{ "DrawableStore", 161965, 81000 },
-		{ "TxdStore", 213500, 80200 },
-		{ "DwdStore", 153800, 20500 },
-		{ "MapDataStore", 50000, 10020 },
-		{ "StaticBounds", 46700, 14700 },
-		{ "fwDynamicEntityComponent", 40000, 8192 },
-		{ "ActiveLoadedInfo", 24000, 3000 },
-		{ "MaxLoadRequestedInfo", 24000, 3000 },
-		{ "ActivePersistentLoadedInfo", 16000, 1439 },
-		{ "MaxLoadedInfo", 46000, 32768 },
+		{ "Vehicles", 300, 300, 300, 300 },
+		{ "VehicleStreamRequest", 240, 240, 60, 60 },
+		{ "VehicleStreamRender", 240, 240, 100, 100 },
+		{ "VehicleStruct", 600, 600, 200, 200 },
+		{ "HandlingData", 5450, 5450, 1800, 3500 },
+		{ "carrec", 5500, 5500, 4000, 4000 },
+		{ "MetaDataStore", 6200, 6400, 3200, 6400 },
+		{ "FragmentStore", 299000, 141500, 42000, 141500 },
+		{ "fwArchetypePooledMap", 65521, 65521, 64000, 65521 },
+		{ "fwDynamicArchetypeComponent", 65521, 16384, 16384, 16384 },
+		{ "DrawableStore", 161965, 119400, 81000, 119400 },
+		{ "TxdStore", 213500, 120000, 80200, 120000 },
+		{ "DwdStore", 153800, 41000, 20500, 41000 },
+		{ "MapDataStore", 50000, 10020, 10020, 10020 },
+		{ "StaticBounds", 46700, 15700, 14700, 15700 },
+		{ "fwDynamicEntityComponent", 40000, 12384, 8192, 12384 },
+		{ "ActiveLoadedInfo", 24000, 13000, 3000, 13000 },
+		{ "MaxLoadRequestedInfo", 24000, 13000, 3000, 13000 },
+		{ "ActivePersistentLoadedInfo", 16000, 14390, 1439, 14390 },
+		{ "MaxLoadedInfo", 46000, 39768, 32768, 39768 },
 	};
 
 	// Rewrites one numeric or attribute value to `target`. `valueAt` is the
 	// offset of the digits and `end` the first byte after them. Returns true
 	// when it changed.
 	//
-	// `raiseOnly` decides what happens to a value that is already larger than
-	// `target`. When the loader is applying its own settings it must never
-	// shrink an existing one: an install that already carries a tuned
-	// gameconfig -- bigger streaming stores, more vehicle slots -- is better off
-	// than whatever this code would write, and overwriting it downwards is
-	// exactly what turns the world low-poly and then makes it disappear. Only
-	// the revert path, which wants stock values back, writes unconditionally.
+	// `raiseOnly` normally refuses to shrink: a hand-tuned gameconfig that is
+	// already larger should win. `clampIfEquals` is the exception — when the
+	// current value is exactly the other edition's ASI target, this build once
+	// wrote the wrong table, and it is safe (and necessary) to pull it back.
 	bool raise_number(std::string& xml, size_t valueAt, size_t end, const char* name,
-		uint64_t target, bool raiseOnly, std::string& report, int& changed)
+		uint64_t target, bool raiseOnly, uint64_t clampIfEquals, std::string& report,
+		int& changed)
 	{
 		const std::string current = trim(xml.substr(valueAt, end - valueAt));
 		const uint64_t value = current.empty()
 			? 0 : std::strtoull(current.c_str(), nullptr, 10);
 		if (value == target)
 			return false;
-		if (raiseOnly && value > target)
-			return false;
+		if (value > target)
+		{
+			const bool crossEdition = clampIfEquals != 0 && value == clampIfEquals;
+			if (raiseOnly && !crossEdition)
+				return false;
+		}
 
 		const std::string raised = std::to_string(target);
 		xml.replace(valueAt, end - valueAt, raised);
@@ -543,7 +608,8 @@ namespace
 	}
 
 	// Sets every `<tag ... value="N"/>` to `target`.
-	int raise_values(std::string& xml, const char* tag, uint64_t target, bool raiseOnly, std::string& report)
+	int raise_values(std::string& xml, const char* tag, uint64_t target, bool raiseOnly,
+		uint64_t clampIfEquals, std::string& report)
 	{
 		int changed = 0;
 		const std::string open = std::string("<") + tag;
@@ -569,7 +635,8 @@ namespace
 				continue;
 			}
 
-			raise_number(xml, digits, quote, tag, target, raiseOnly, report, changed);
+			raise_number(xml, digits, quote, tag, target, raiseOnly, clampIfEquals, report,
+				changed);
 			cursor = static_cast<size_t>(xml.find('>', digits)) + 1;
 			if (cursor == 0)
 				break;
@@ -580,7 +647,8 @@ namespace
 	// Sets `<PoolName>X</PoolName><PoolSize value="N"/>` to `target`. The two tags
 	// are matched as a pair because a bare `Vehicles` would also hit
 	// `VehicleStruct` and every other vehicle-prefixed pool.
-	int raise_pool(std::string& xml, const char* pool, uint64_t target, bool raiseOnly, std::string& report)
+	int raise_pool(std::string& xml, const char* pool, uint64_t target, bool raiseOnly,
+		uint64_t clampIfEquals, std::string& report)
 	{
 		int changed = 0;
 		const std::string key = std::string("<PoolName>") + pool + "</PoolName>";
@@ -609,7 +677,8 @@ namespace
 				continue;
 			}
 
-			raise_number(xml, digits, quote, pool, target, raiseOnly, report, changed);
+			raise_number(xml, digits, quote, pool, target, raiseOnly, clampIfEquals, report,
+				changed);
 			cursor = static_cast<size_t>(xml.find('>', digits)) + 1;
 			if (cursor == 0)
 				break;
@@ -617,16 +686,23 @@ namespace
 		return changed;
 	}
 
-	// Raises listed ceilings toward their targets. Values already above a target
-	// are left alone (raiseOnly). Returns `original` when nothing changed.
+	// Raises listed ceilings toward this edition's targets. Values already above
+	// a target are left alone, except when they exactly match the other edition's
+	// ASI target (cross-edition repair). Returns `original` when nothing changed.
 	std::string build_gameconfig(const std::string& original, int& changed, std::string& report)
 	{
 		std::string patched = original;
 		changed = 0;
 		for (const auto& limit : kAttributeLimits)
-			changed += raise_values(patched, limit.tag, limit.target, true, report);
+		{
+			changed += raise_values(patched, limit.tag, limit_target(limit), true,
+				limit_other_target(limit), report);
+		}
 		for (const auto& limit : kPoolLimits)
-			changed += raise_pool(patched, limit.tag, limit.target, true, report);
+		{
+			changed += raise_pool(patched, limit.tag, limit_target(limit), true,
+				limit_other_target(limit), report);
+		}
 		return changed == 0 ? original : patched;
 	}
 
@@ -818,6 +894,8 @@ namespace
 	// gameconfig.xml are never two separate rewrites of a 1.9 GB file.
 	bool install(const std::string& path, rpftoc::Table& table,
 		const std::string& xml, const std::vector<std::string>& packs,
+		const std::set<std::string>& pruneAddons, const std::set<std::string>& claimableAddons,
+		std::vector<std::string>& claimedAddons,
 		const std::string& gameConfig, GameConfigMode gcMode, const std::string& userGameConfig,
 		std::string& error)
 	{
@@ -830,7 +908,8 @@ namespace
 
 		int added = 0;
 		int removed = 0;
-		const std::string listPatched = build_patched(xml, packs, added, removed, error);
+		const std::string listPatched = build_patched(xml, packs, pruneAddons, claimableAddons,
+			claimedAddons, added, removed, error);
 		if (listPatched.empty())
 			return false;
 
@@ -881,7 +960,7 @@ namespace
 		{
 			gcPatched = build_gameconfig(gameConfig, limits, limitReport);
 			gcCurrent = (limits == 0);
-			gcAction = "raise";
+			gcAction = IsEnhanced() ? "raise (enhanced)" : "raise (legacy)";
 			if (!gcCurrent)
 				edits.push_back({ static_cast<uint32_t>(gcIndex), kGameConfigPath, gcPatched,
 					patched_gameconfig_path() });
@@ -920,18 +999,42 @@ namespace
 
 namespace dlclist
 {
-	void Reserve(const std::vector<std::string>& packs)
+	void Reserve(const std::vector<std::string>& packs,
+		const std::vector<std::string>& pruneAddons,
+		const std::vector<std::string>& claimableAddons)
 	{
 		std::lock_guard<std::mutex> lock(g_mutex);
 		g_packs = packs;
+		g_prune_addons.clear();
+		for (const auto& pack : pruneAddons)
+			if (!pack.empty())
+				g_prune_addons.insert(pack_item(pack));
+		g_claimable_addons.clear();
+		for (const auto& pack : claimableAddons)
+			if (!pack.empty())
+				g_claimable_addons.insert(pack_item(pack));
+		g_claimed_addons.clear();
+	}
+
+	std::vector<std::string> TakeClaimedAddons()
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		std::vector<std::string> claimed;
+		claimed.swap(g_claimed_addons);
+		return claimed;
 	}
 
 	void Prepare()
 	{
 		std::vector<std::string> packs;
+		std::set<std::string> pruneAddons;
+		std::set<std::string> claimableAddons;
 		{
 			std::lock_guard<std::mutex> lock(g_mutex);
 			packs = g_packs;
+			pruneAddons = g_prune_addons;
+			claimableAddons = g_claimable_addons;
+			g_claimed_addons.clear();
 		}
 
 		// An empty reservation is not the same as "nothing to do": it means every
@@ -950,7 +1053,7 @@ namespace dlclist
 		}
 
 		std::error_code ec;
-		if (packs.empty() && !fs::is_regular_file(mods, ec))
+		if (packs.empty() && pruneAddons.empty() && !fs::is_regular_file(mods, ec))
 		{
 			// Nothing to register and no mods archive to clean: seeding a 1.9 GB
 			// copy just to prune an empty list would be pure cost.
@@ -1048,10 +1151,18 @@ namespace dlclist
 			}
 		}
 
-		if (!install(mods.string(), table, xml, packs, gameConfig, gcMode, userGameConfig, error))
+		std::vector<std::string> claimedAddons;
+		if (!install(mods.string(), table, xml, packs, pruneAddons, claimableAddons, claimedAddons,
+				gameConfig, gcMode, userGameConfig, error))
 		{
 			logger::write("fivem", "[dlclist] %s: %s", mods.string().c_str(), error.c_str());
 			i18n::show(i18n::Message::ConversionFailed);
+			return;
+		}
+
+		{
+			std::lock_guard<std::mutex> lock(g_mutex);
+			g_claimed_addons = std::move(claimedAddons);
 		}
 	}
 }

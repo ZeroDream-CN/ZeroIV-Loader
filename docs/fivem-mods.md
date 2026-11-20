@@ -94,10 +94,25 @@ use mode 1.
 
 ## `dlclist.xml`
 
-ZeroIV only manages entries whose path starts with `dlcpacks:/ziv_`.
+ZeroIV always registers generated `ziv_*` packs from FiveM resources under
+`unpack-mods/`.
 
-- Packs you add by hand under other names are **kept**
-- Generated `ziv_*` lines track whatever is currently under `unpack-mods/`
+With `[fivem] registerAddonPacks=true` (default), it also registers traditional
+add-on folders that already contain `dlc.rpf`, under
+`mods/update/x64/dlcpacks/<name>/`, `unpack-mods/dlcpacks/<name>/`, or
+`unpack-mods/.cache/dlcpacks/<name>/`. Set `registerAddonPacks=false` to leave
+those for hand-edited `dlclist.xml` entries.
+
+Cleanup rules:
+
+- `dlcpacks:/ziv_*` — pruned when the matching FiveM resource disappears
+- Traditional packs ZeroIV auto-added — recorded in
+  `unpack-mods/.cache/registered-addon-packs.txt`; only those names are removed
+  from `dlclist.xml` when the folder is gone from **all** of: `mods/`,
+  `unpack-mods/`, and the retail `update/x64/dlcpacks/`
+- Retail game DLC under `update/x64/dlcpacks/` — never auto-added to the
+  manifest and never removed from `dlclist.xml`
+- Lines you added by hand — never touched
 
 You normally do not edit `dlclist.xml` for ZeroIV packs.
 
@@ -113,6 +128,9 @@ enabled = true
 patchGameConfig = true
 plainifyRpf = true
 patchStockUpdateRpf = false
+; true = also auto-register traditional dlcpacks folders into dlclist
+; FiveM resources are always scanned regardless
+registerAddonPacks = true
 
 [paths]
 mods = mods
@@ -125,6 +143,7 @@ unpackMods = unpack-mods
 | `patchGameConfig` | See [modes](#gameconfigxml--three-modes) above |
 | `plainifyRpf` | Keep `mods/update/update.rpf` as a plaintext OPEN archive after the first conversion |
 | `patchStockUpdateRpf` | Leave `false`. Only set `true` if you intentionally want the loader to edit the Steam `update/update.rpf` instead of the `mods/` copy |
+| `registerAddonPacks` | Auto-add traditional `dlcpacks/<name>/dlc.rpf` folders to `dlclist.xml`. FiveM resources are always scanned |
 
 ## Check that it worked
 

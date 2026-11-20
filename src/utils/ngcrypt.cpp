@@ -1,4 +1,7 @@
 #include "ngcrypt.h"
+#include "ngextract.h"
+
+#include "utils/log.h"
 
 #include <Windows.h>
 
@@ -23,6 +26,9 @@
 	the reference implementation (CodeWalker's GTA5Crypto), which is also what
 	gtalib-go's crypto package does; the layout and the byte/word order below are
 	verified against it.
+
+	Tables are resolved in order: embedded NGDATA resource, ZeroIV.ngdata.bin
+	cache next to the log, then a live SHA-1 scan of the game module.
 */
 
 namespace
@@ -35,9 +41,13 @@ namespace
 	constexpr size_t kTablesWords = 17 * 16 * 256;
 	constexpr size_t kTotalBytes = kTablesOffset + kTablesWords * 4;
 
+	static_assert(kTotalBytes == ngextract::kBlobBytes, "ngcrypt blob size drift");
+
 	const uint8_t* g_lut = nullptr;
 	const uint8_t* g_keys = nullptr;
 	const uint32_t* g_tables = nullptr;
+	// Owns cache / extract blobs; the embedded resource is owned by the PE.
+	std::vector<uint8_t> g_owned;
 	std::once_flag g_once;
 	bool g_ok = false;
 	std::string g_error = "NG tables not loaded";
@@ -137,22 +147,31 @@ namespace
 		std::memcpy(out, current, 16);
 	}
 
-	void load()
+	void bind(const uint8_t* data)
+	{
+		g_lut = data;
+		g_keys = data + kKeysOffset;
+		g_tables = reinterpret_cast<const uint32_t*>(data + kTablesOffset);
+		g_ok = true;
+		g_error.clear();
+	}
+
+	bool try_resource(std::string& error)
 	{
 		HMODULE module = nullptr;
 		if (!::GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
 				GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-				reinterpret_cast<LPCSTR>(&load), &module))
+				reinterpret_cast<LPCSTR>(&try_resource), &module))
 		{
-			g_error = "cannot locate the loader module";
-			return;
+			error = "cannot locate the loader module";
+			return false;
 		}
 
 		HRSRC found = ::FindResourceA(module, "NGDATA", RT_RCDATA);
 		if (!found)
 		{
-			g_error = "the NG tables resource is missing from the build";
-			return;
+			error = "the NG tables resource is missing from the build";
+			return false;
 		}
 
 		HGLOBAL loaded = ::LoadResource(module, found);
@@ -160,16 +179,78 @@ namespace
 		const DWORD size = ::SizeofResource(module, found);
 		if (!data || size != kTotalBytes)
 		{
-			g_error = "the NG tables resource has the wrong size (" + std::to_string(size) +
+			error = "the NG tables resource has the wrong size (" + std::to_string(size) +
 				" instead of " + std::to_string(kTotalBytes) + ")";
-			return;
+			return false;
 		}
 
-		g_lut = data;
-		g_keys = data + kKeysOffset;
-		g_tables = reinterpret_cast<const uint32_t*>(data + kTablesOffset);
-		g_ok = true;
-		g_error.clear();
+		bind(data);
+		logger::write("info", "ng: tables loaded from embedded NGDATA resource");
+		return true;
+	}
+
+	bool try_cache(std::string& error)
+	{
+		std::vector<uint8_t> blob;
+		if (!ngextract::from_cache(blob, error))
+			return false;
+		g_owned = std::move(blob);
+		bind(g_owned.data());
+		logger::write("info", "ng: tables loaded from %s", ngextract::kCacheFile);
+		return true;
+	}
+
+	bool cache_and_bind(std::vector<uint8_t> blob, const char* source)
+	{
+		std::string cacheError;
+		if (ngextract::to_cache(blob, cacheError))
+			logger::write("info", "ng: cached tables as %s", ngextract::kCacheFile);
+		else
+			logger::write("info", "ng: %s ok but cache failed (%s)", source, cacheError.c_str());
+
+		g_owned = std::move(blob);
+		bind(g_owned.data());
+		logger::write("info", "ng: tables loaded via %s", source);
+		return true;
+	}
+
+	bool try_magic(std::string& error)
+	{
+		std::vector<uint8_t> blob;
+		if (!ngextract::from_magic(blob, error))
+			return false;
+		return cache_and_bind(std::move(blob), "magic.dat");
+	}
+
+	bool try_scan(std::string& error)
+	{
+		std::vector<uint8_t> blob;
+		if (!ngextract::from_process(blob, error))
+			return false;
+		return cache_and_bind(std::move(blob), "module scan");
+	}
+
+	void load()
+	{
+		std::string error;
+		if (try_resource(error))
+			return;
+		const std::string resourceError = error;
+
+		if (try_cache(error))
+			return;
+
+		// Enhanced has no plaintext NG blobs for HashSearch; magic.dat + AES is
+		// the path that actually works there (and on Legacy too).
+		if (try_magic(error))
+			return;
+		const std::string magicError = error;
+
+		if (try_scan(error))
+			return;
+
+		g_error = "NG tables unavailable (resource: " + resourceError +
+			"; magic: " + magicError + "; scan: " + error + ")";
 	}
 }
 

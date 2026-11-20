@@ -1,23 +1,24 @@
 # NG key tables
 
-`src/resources/ngdata.bin` is **not in this repository**. It is Rockstar's key
-material, read out of the retail game, and a public GPL tree is the wrong place
-for it.
+Plaintext `ngdata.bin` is **not in this repository**. It is Rockstar's key
+material. The loader obtains working tables at runtime instead.
 
-## What the build does without it
+## How the loader gets the tables
 
-Nothing breaks. `CMakeLists.txt` writes `src/resources/ngdata.rcinc` at configure
-time, and emits the `NGDATA` resource only when the file is present. Verified
-both ways:
+`ngcrypt::init()` tries sources in this order:
 
-| `ngdata.bin` | `ZeroIV.asi` | CIPHER |
-| --- | --- | --- |
-| present | 1.04 MB | available |
-| absent | 0.75 MB | `ngcrypt::init()` fails, every caller reports it and stops |
-
-Without the tables the loader still starts, reads archives and patches
-`gameconfig.xml`; only the paths that need to decrypt an NG payload refuse to
-run. That is the intended degradation.
+1. **Embedded `NGDATA` resource** — only when a local `src/resources/ngdata.bin`
+   existed at configure time (optional offline/dev builds).
+2. **`ZeroIV.ngdata.bin`** next to `ZeroIV.log` — written after a successful
+   extract so later boots skip the work.
+3. **`magic.dat` unlock** — the obfuscated blob embedded as
+   `src/utils/ngmagic_data.cpp` (same material CodeWalker / gtalib-go ship).
+   The retail AES key is found by SHA-1 in the live modules; JenkHash + the
+   .NET PRNG unscramble the blob; AES-256-ECB + raw deflate yield the tables.
+   This is what works on **GTA V Enhanced** (and Legacy).
+4. **Module SHA-1 scan** — digests in `src/utils/nghashes.cpp` (CodeWalker
+   `GTA5KeyHashes`). Useful on some Legacy dumps; Enhanced usually has no
+   matching plaintext blobs, so this is a fallback only.
 
 ## Layout
 
@@ -29,26 +30,24 @@ run. That is the intended degradation.
 | `256` | 101 x 272 | the NG round keys, one per key index |
 | `27,728` | 17 x 16 x 256 x 4 | the round tables, 17 rounds of 16 rows of 256 dwords |
 
-The cipher is a straight port of CodeWalker's `GTA5Crypto`, which is where the
-layout and the byte/word order come from. Any generator that reproduces those
-three regions byte for byte is compatible.
+## Optional local embed
 
-## How to get one
+For machines that cannot run a first extract, place a 306,256-byte blob at
+`src/resources/ngdata.bin` and reconfigure. The resource path stays first.
 
-The key material lives inside `GTA5.exe`, which is packed on disk: an offline
-scan of the file finds nothing, because the code that holds the tables is not in
-the on-disk image. It has to be read out of the process after the game has
-loaded, which is something this loader can do and a standalone tool cannot.
+## Regenerating the magic embed
 
-That extraction is **not implemented yet**. Until it is, a build needs a blob
-produced by hand and placed at `src/resources/ngdata.bin`. The intended end state
-is that the first run reads the tables from the running process, caches them
-next to the logs, and the embedded resource disappears entirely -- which also
-retires this document's first paragraph.
+```bash
+# After updating src/resources/magic.dat from CodeWalker / gtalib-go:
+python3 - <<'PY'
+from pathlib import Path
+data = Path('src/resources/magic.dat').read_bytes()
+# ... rewrite src/utils/ngmagic_data.cpp (see git history / prior embed script)
+PY
+```
 
-## Why not just ship it
+## Why not ship plaintext keys
 
-The repository is public and GPL-3.0. Redistributing key material extracted from
-a commercial game is the kind of thing that attracts a takedown, and it is not
-needed: the tables are reachable at runtime on any machine that can run the
-loader in the first place.
+The repository is public and GPL-3.0. Redistributing raw key tables invites
+takedowns. The obfuscated `magic.dat` form is what existing open tools already
+distribute; plaintext `ngdata.bin` stays optional and untracked.

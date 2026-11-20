@@ -691,6 +691,172 @@ namespace fivem
 		return resources;
 	}
 
+	// Traditional add-on DLC folders (OpenIV / CodeWalker layout) that already
+	// have a dlc.rpf — as a real archive or as a loose directory. These are not
+	// FiveM resources, so the generator never sees them; they still need a
+	// dlclist.xml line or the engine never mounts them.
+	//
+	// Auto-registered names are recorded under generated_root so a later start
+	// can remove only those lines when the folder disappears — never a line the
+	// player typed into dlclist by hand.
+	std::string trim_line(const std::string& value)
+	{
+		const size_t begin = value.find_first_not_of(" \t\r\n");
+		if (begin == npos)
+			return {};
+		const size_t end = value.find_last_not_of(" \t\r\n");
+		return value.substr(begin, end - begin + 1);
+	}
+
+	fs::path addon_manifest_path()
+	{
+		return config::generated_root() / "registered-addon-packs.txt";
+	}
+
+	// Retail game tree (cwd while the ASI runs). Stock DLC lives here and must
+	// never be pulled out of dlclist.xml.
+	fs::path stock_dlcpacks_root()
+	{
+		std::error_code ec;
+		return fs::current_path(ec) / "update" / "x64" / "dlcpacks";
+	}
+
+	bool has_dlc_rpf(const fs::path& packDir)
+	{
+		std::error_code ec;
+		const fs::path dlc = packDir / "dlc.rpf";
+		return fs::exists(dlc, ec);
+	}
+
+	bool is_ziv_pack(const std::string& name)
+	{
+		return name.size() >= 4 &&
+			_strnicmp(name.c_str(), "ziv_", 4) == 0;
+	}
+
+	// Pack folder names that ship with the game install. Built once per Init.
+	std::set<std::string> list_stock_packs()
+	{
+		std::set<std::string> names;
+		std::error_code ec;
+		const fs::path root = stock_dlcpacks_root();
+		if (!fs::is_directory(root, ec))
+			return names;
+		for (const auto& entry : fs::directory_iterator(root, ec))
+		{
+			if (!entry.is_directory(ec))
+				continue;
+			const std::string name = entry.path().filename().string();
+			if (name.empty() || name[0] == '.' || is_ziv_pack(name))
+				continue;
+			// Stock packs are always a real dlc.rpf file, not a loose directory.
+			if (!fs::is_regular_file(entry.path() / "dlc.rpf", ec))
+				continue;
+			names.insert(name);
+		}
+		return names;
+	}
+
+	bool name_in_set_ci(const std::set<std::string>& names, const std::string& name)
+	{
+		if (names.count(name) > 0)
+			return true;
+		for (const auto& item : names)
+			if (item.size() == name.size() &&
+				_strnicmp(item.c_str(), name.c_str(), name.size()) == 0)
+				return true;
+		return false;
+	}
+
+	// True when a dlc.rpf for `name` exists under mods, unpack-mods, the
+	// generated cache, or the retail game dlcpacks folder.
+	bool pack_present(const std::string& name, const std::set<std::string>& stockPacks)
+	{
+		if (name_in_set_ci(stockPacks, name))
+			return true;
+
+		const fs::path roots[] = {
+			config::mods_root() / "update" / "x64" / "dlcpacks" / name,
+			config::unpack_root() / "dlcpacks" / name,
+			config::generated_root() / "dlcpacks" / name,
+			stock_dlcpacks_root() / name,
+		};
+		for (const auto& dir : roots)
+			if (has_dlc_rpf(dir))
+				return true;
+		return false;
+	}
+
+	std::set<std::string> load_addon_manifest()
+	{
+		std::set<std::string> names;
+		std::ifstream in(addon_manifest_path());
+		if (!in)
+			return names;
+		std::string line;
+		while (std::getline(in, line))
+		{
+			const std::string name = trim_line(line);
+			if (!name.empty() && name[0] != '#')
+				names.insert(name);
+		}
+		return names;
+	}
+
+	void save_addon_manifest(const std::set<std::string>& names)
+	{
+		std::error_code ec;
+		fs::create_directories(addon_manifest_path().parent_path(), ec);
+		std::ofstream out(addon_manifest_path(), std::ios::trunc);
+		if (!out)
+		{
+			logger::write("fivem", "[init] cannot write %s",
+				addon_manifest_path().string().c_str());
+			return;
+		}
+		out << "# Traditional dlcpacks auto-registered into dlclist.xml by ZeroIV.\n";
+		out << "# Only these names are removed when the folder disappears.\n";
+		out << "# Retail update/x64/dlcpacks names are never listed or pruned.\n";
+		for (const auto& name : names)
+			out << name << '\n';
+	}
+
+	// Discovers traditional (non-ziv_, non-stock) packs under mods / unpack layers.
+	// The retail game folder is not scanned for auto-add — those entries already
+	// live in stock dlclist.xml and must stay there.
+	std::vector<std::string> discover_addon_packs(const std::set<std::string>& stockPacks)
+	{
+		std::vector<std::string> packs;
+		std::set<std::string> seen;
+		const fs::path roots[] = {
+			config::mods_root() / "update" / "x64" / "dlcpacks",
+			config::unpack_root() / "dlcpacks",
+			config::generated_root() / "dlcpacks",
+		};
+
+		for (const auto& root : roots)
+		{
+			std::error_code ec;
+			if (!fs::is_directory(root, ec))
+				continue;
+			for (const auto& entry : fs::directory_iterator(root, ec))
+			{
+				if (!entry.is_directory(ec))
+					continue;
+				const std::string name = entry.path().filename().string();
+				if (name.empty() || name[0] == '.' || is_ziv_pack(name) ||
+					name_in_set_ci(stockPacks, name) || !has_dlc_rpf(entry.path()))
+					continue;
+				if (!seen.insert(name).second)
+					continue;
+				packs.push_back(name);
+				logger::write("fivem", "[init] addon pack %s (%s)", name.c_str(),
+					root.string().c_str());
+			}
+		}
+		return packs;
+	}
+
 	void Init()
 	{
 		static const bool enabled = config::get_value<bool>("fivem", "enabled", true);
@@ -739,12 +905,78 @@ namespace fivem
 		// so an emptied unpack-mods folder also empties the generated setup.
 		dlcgen::Prune(packs);
 
-		dlclist::Reserve(packs);
+		// Traditional packs: always reconcile the tracked manifest so deleted
+		// auto-registered folders leave dlclist. registerAddonPacks only gates
+		// whether newly discovered folders are added (and claimed) this run.
+		// Presence checks also look under the retail game dlcpacks folder; stock
+		// pack names are never claimed and never pruned from dlclist.
+		static const bool registerAddons =
+			config::get_value<bool>("fivem", "registerAddonPacks", true);
+		const std::set<std::string> stockPacks = list_stock_packs();
+		const std::set<std::string> previousAddons = load_addon_manifest();
+		const std::vector<std::string> discovered = discover_addon_packs(stockPacks);
+
+		std::vector<std::string> pruneAddons;
+		for (const auto& name : previousAddons)
+		{
+			if (name_in_set_ci(stockPacks, name))
+			{
+				// Stale manifest entry for a retail pack — drop from the list
+				// file only; never touch dlclist.xml.
+				logger::write("fivem", "[init] addon pack %s is retail; leaving "
+					"dlclist alone", name.c_str());
+				continue;
+			}
+			if (pack_present(name, stockPacks))
+				continue;
+			pruneAddons.push_back(name);
+			logger::write("fivem", "[init] addon pack %s gone from mods, unpack-mods "
+				"and retail dlcpacks; will drop tracked dlclist entry", name.c_str());
+		}
+
+		std::vector<std::string> claimableAddons;
+		if (registerAddons)
+		{
+			std::set<std::string> seen(packs.begin(), packs.end());
+			for (const auto& name : discovered)
+			{
+				if (seen.insert(name).second)
+					packs.push_back(name);
+				claimableAddons.push_back(name);
+			}
+		}
+		else
+			logger::write("fivem", "[init] registerAddonPacks=off; traditional "
+				"dlcpacks not auto-added (tracked removals still apply)");
+
+		dlclist::Reserve(packs, pruneAddons, claimableAddons);
 
 		// The archive is still closed here, so the list can be rewritten as plain
 		// file I/O. When it is still NG-encrypted, this call only decides that one
 		// read-only pass is needed and the work is deferred to OnArchiveOpened.
 		dlclist::Prepare();
+
+		// Manifest tracks traditional packs this loader is responsible for:
+		// still-present previous claims, lines inserted this run, and (when
+		// registerAddonPacks is on) every pack discovered this start — including
+		// ones already in dlclist, so a later delete can still clean them up.
+		// Retail packs and hand-edited lines with no matching folder stay out.
+		std::set<std::string> nextManifest;
+		for (const auto& name : previousAddons)
+		{
+			if (name_in_set_ci(stockPacks, name))
+				continue;
+			if (pack_present(name, stockPacks))
+				nextManifest.insert(name);
+		}
+		for (const auto& name : dlclist::TakeClaimedAddons())
+			if (!name_in_set_ci(stockPacks, name))
+				nextManifest.insert(name);
+		if (registerAddons)
+			for (const auto& name : discovered)
+				nextManifest.insert(name);
+		if (nextManifest != previousAddons)
+			save_addon_manifest(nextManifest);
 
 		logger::write("fivem", "[init] %d pack(s) armed for dlclist in %llums",
 			static_cast<int>(packs.size()),

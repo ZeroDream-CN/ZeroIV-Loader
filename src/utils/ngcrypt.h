@@ -13,9 +13,9 @@
 //   keys           101 x 272 bytes        one per key index
 //   decrypt tables 17 x 16 x 256 uint32   the cipher rounds
 //
-// They do not depend on the installation, so they are compiled in as one
-// resource (resources/ngdata.bin) instead of being derived from GTA5.exe at
-// start-up, which would cost seconds of search plus a full table solve.
+// They do not depend on the installation. Resolution order (see docs/ng-keys.md):
+// embedded NGDATA resource, ZeroIV.ngdata.bin cache, then a live SHA-1 scan of
+// the running game modules. Digests live in nghases; key bytes never ship.
 //
 // The key index is what makes this cipher awkward: it mixes the file's name and
 // its total size, so an archive is only decryptable while its length is

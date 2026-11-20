@@ -81,6 +81,9 @@ public:
 		// leaves the archive alone. A file at unpack-mods/gameconfig.xml always
 		// wins: it is copied in and the automatic raises are skipped.
 		add_default<std::string>("fivem", "patchGameConfig", "true", added);
+		// Register traditional (non-FiveM) dlcpacks folders into dlclist.xml.
+		// FiveM resources under unpack-mods/ are always scanned regardless.
+		add_default<bool>("fivem", "registerAddonPacks", true, added);
 		add_default<bool>("log", "info", false, added);
 		add_default<bool>("log", "mods", false, added);
 		add_default<bool>("log", "rpf", false, added);

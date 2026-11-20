@@ -106,4 +106,4 @@ if(ENABLE_LOGS)
 endif()
 
 target_link_directories(ZeroIVLoader PUBLIC "${CMAKE_BINARY_DIR}/LIB")
-target_link_libraries(ZeroIVLoader version.lib ws2_32.lib debug minhook.x64d.lib optimized minhook.x64.lib)
+target_link_libraries(ZeroIVLoader version.lib ws2_32.lib bcrypt.lib debug minhook.x64d.lib optimized minhook.x64.lib)

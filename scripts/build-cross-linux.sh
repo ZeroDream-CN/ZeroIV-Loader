@@ -444,7 +444,7 @@ OUTPUT="$DIST_DIR/ZeroIV.asi"
 "$CXX" "${LDFLAGS[@]}" -o "$OUTPUT" \
     "${OBJECTS[@]}" \
     -L"$MINHOOK_BUILD" -lminhook \
-    -lversion -lws2_32
+    -lversion -lws2_32 -lbcrypt
 
 # A default configuration ships next to the binary. The loader also creates one
 # on first launch and never overwrites an existing file.

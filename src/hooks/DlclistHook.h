@@ -38,9 +38,22 @@
 namespace dlclist
 {
 	// Pack names (dlcpacks/<pack>/) that must be present in dlclist.xml.
-	void Reserve(const std::vector<std::string>& packs);
+	// Includes generated ziv_* packs and traditional add-on folders discovered
+	// under mods/ or unpack-mods/dlcpacks/.
+	//
+	// `pruneAddons` — traditional packs this loader previously auto-registered
+	// that are gone from disk; only those lines are removed (never hand-edited
+	// entries). `claimableAddons` — traditional packs discovered this run; any
+	// line actually inserted for them is reported by TakeClaimedAddons().
+	void Reserve(const std::vector<std::string>& packs,
+		const std::vector<std::string>& pruneAddons = {},
+		const std::vector<std::string>& claimableAddons = {});
 
 	// Converts mods/update/update.rpf to a plaintext table of contents and
 	// registers every reserved pack. Called before the engine opens the archive.
 	void Prepare();
+
+	// Traditional pack names whose <Item> lines were inserted by the last
+	// Prepare(). Empty when nothing new was claimed.
+	std::vector<std::string> TakeClaimedAddons();
 }
