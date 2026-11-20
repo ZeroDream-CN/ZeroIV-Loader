@@ -5,6 +5,9 @@
 #include "utils/inflate.h"
 #include "utils/log.h"
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <Windows.h>
 #include <bcrypt.h>
 #include <tlhelp32.h>
@@ -235,7 +238,7 @@ namespace
 
 		const size_t last = size - length;
 		const size_t numBlocks = (last / kBlock) + 1;
-		const unsigned workers = std::max(1u, std::thread::hardware_concurrency());
+		const unsigned workers = (std::max)(1u, std::thread::hardware_concurrency());
 		std::mutex mu;
 
 		auto worker = [&](size_t blockIndex) {
