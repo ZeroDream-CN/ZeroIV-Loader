@@ -25,13 +25,22 @@ namespace
 
 	// Bumped whenever the generated layout changes, so an existing cache is
 	// rebuilt instead of being reused with stale content.
+	// 除非有重大改动，否则不要变更版本号，测试的时候优先清空缓存
 	//   4: streamed assets are flattened to the archive root, because a
 	//      `stream/` prefix in the entry path stops models from streaming.
 	//   5: the streamed assets live in stream.rpf, not vehicles.rpf.
 	//   6: setup2.xml is written with an order above every stock pack, so a
 	//      layout or handling definition owned by a retail DLC exists before
 	//      this pack's vehicles are registered.
-	constexpr int kGeneratorVersion = 6;
+	//   7: this_is_a_map resources become EXTRACONTENT_LEVEL_PACK packs with
+	//      metadata.rpf / mapdata.rpf split out; dumping _manifest.ymf into a
+	//      plain stream.rpf crashed Enhanced while parsing map metadata.
+	//   8: map setup2/content match a working OpenIV level pack (change-set
+	//      groups, MPHEIST mp-stream name, models/metadata flags); maps also
+	//      mount earlier via dlclist ordering.
+	//      pdoccl/strmfile overlays also start enabled with CONTENTS so
+	//      stock-named replacements do not UAF on leave/re-enter.
+	constexpr int kGeneratorVersion = 8;
 
 	// The sequence number written to setup2.xml's <order>.
 	//
@@ -60,7 +69,33 @@ namespace
 	// lookup for `nisa31`.
 	const char* kStreamArchive = "stream.rpf";
 
+	// Map packs mirror a working retail/OpenIV level DLC (see ron_247shop):
+	// models, metadata (CONTENTS_DLC_MAP_DATA), occlusion overlay, story strm
+	// overlay, and heist/mp strm — all under %PLATFORM%/levels/gta5/.
+	const char* kMapLevelsDir = "levels/gta5";
+	const char* kMapModelsArchive = "models.rpf";
+	const char* kMapMetadataArchive = "metadata.rpf";
+	const char* kMapPdocclArchive = "pdoccl.rpf";
+	const char* kMapStrmfileArchive = "strmfile.rpf";
+	const char* kMapMpstrmArchive = "mpstrm.rpf";
+	constexpr int kMapDlcOrder = 36;
+
 	constexpr size_t npos = std::string::npos;
+
+	bool ends_with_ci(const std::string& value, const char* suffix)
+	{
+		const size_t suffixLen = std::strlen(suffix);
+		if (value.size() < suffixLen)
+			return false;
+		for (size_t i = 0; i < suffixLen; ++i)
+		{
+			const unsigned char a = static_cast<unsigned char>(value[value.size() - suffixLen + i]);
+			const unsigned char b = static_cast<unsigned char>(suffix[i]);
+			if (::tolower(a) != ::tolower(b))
+				return false;
+		}
+		return true;
+	}
 
 	std::string lower_copy(std::string value)
 	{
@@ -467,6 +502,289 @@ namespace
 		return xml.str();
 	}
 
+	// Buckets match the working ron_247shop OpenIV layout.
+	enum class MapBucket
+	{
+		Models,    // *.rpf models/collisions/textures
+		Metadata,  // _manifest.ymf, .ytyp, milo/mlo, optional meta-only ymap
+		Pdoccl,    // occlusion ymap overlay
+		Strmfile,  // story-mode *_strm_*.ymap overlay
+		Mpstrm,    // hei_* / MP strm ymap
+	};
+
+	bool is_interior_ymap(const std::string& lowerBasename)
+	{
+		return lowerBasename.find("milo") != npos || lowerBasename.find("mlo") != npos;
+	}
+
+	// Files named `_metadata_<name>` are staged into metadata.rpf as `<name>` —
+	// used when the same ymap exists in both metadata and pdoccl with different
+	// bytes (ron_247shop's ch1_occl_03).
+	std::string map_stage_name(const std::string& basename)
+	{
+		const std::string lower = lower_copy(basename);
+		const char* prefix = "_metadata_";
+		const size_t prefixLen = std::strlen(prefix);
+		if (lower.size() > prefixLen && lower.compare(0, prefixLen, prefix) == 0)
+			return basename.substr(prefixLen);
+		return basename;
+	}
+
+	MapBucket classify_map_asset(const std::string& basename)
+	{
+		const std::string lower = lower_copy(basename);
+		const std::string staged = lower_copy(map_stage_name(basename));
+
+		if (ends_with_ci(lower, ".ymf") || ends_with_ci(lower, ".ytyp"))
+			return MapBucket::Metadata;
+		if (lower.rfind("_metadata_", 0) == 0)
+			return MapBucket::Metadata;
+		if (ends_with_ci(lower, ".ymap"))
+		{
+			if (is_interior_ymap(staged))
+				return MapBucket::Metadata;
+			if (staged.find("occl") != npos)
+				return MapBucket::Pdoccl;
+			if (staged.rfind("hei_", 0) == 0)
+				return MapBucket::Mpstrm;
+			return MapBucket::Strmfile;
+		}
+		return MapBucket::Models;
+	}
+
+	// Stable interior proxy base so two generated map packs do not start from
+	// the same index. The absolute value only has to clear the stock range.
+	uint32_t interior_start_from(const std::string& pack)
+	{
+		uint32_t hash = 2166136261u;
+		for (unsigned char c : pack)
+		{
+			hash ^= c;
+			hash *= 16777619u;
+		}
+		return 4000u + (hash % 50000u);
+	}
+
+	std::string interior_proxy_name(const std::string& basename)
+	{
+		std::string name = basename;
+		if (ends_with_ci(name, ".ymap"))
+			name.resize(name.size() - 5);
+		return name;
+	}
+
+	std::string build_interior_proxies(const std::string& pack,
+		const std::vector<std::string>& interiorNames)
+	{
+		std::ostringstream xml;
+		xml << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+		xml << "<SInteriorOrderData>\n";
+		xml << "  <startFrom value=\"" << interior_start_from(pack) << "\" />\n";
+		xml << "  <proxies>\n";
+		for (const auto& name : interiorNames)
+			xml << "    <Item>" << xml_escape(name) << "</Item>\n";
+		xml << "  </proxies>\n";
+		xml << "</SInteriorOrderData>\n";
+		return xml.str();
+	}
+
+	std::string map_archive_path(const char* archive)
+	{
+		return std::string("%PLATFORM%/") + kMapLevelsDir + "/" + archive;
+	}
+
+	// Stock heist change-set name cityhills_01 map DLCs piggyback on. Referenced
+	// from GROUP_MAP so mpstrm enables with the retail heist streaming pass.
+	const char* kMapMpStreamChangeSet = "MPHEIST_GTA5_HILLS_CITYHILLS_01";
+
+	// Copied from a known-good OpenIV map DLC (ron_247shop): LEVEL_PACK at the
+	// stock map-pack order, with the same change-set groups the game expects.
+	std::string build_map_setup2(const std::string& pack)
+	{
+		const std::string ccsInit = "CCS_" + pack + "_NG_INIT";
+		const std::string ccsStreaming = "CCS_" + pack + "_NG_STREAMING";
+		const std::string ccsStreamingMap = "CCS_" + pack + "_NG_STREAMING_MAP";
+		const std::string ccsText = "CCS_" + pack + "_NG_TEXT";
+
+		std::ostringstream xml;
+		xml << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+		xml << "<SSetupData>\n";
+		xml << "  <deviceName>dlc_" << xml_escape(pack) << "</deviceName>\n";
+		xml << "  <datFile>content.xml</datFile>\n";
+		xml << "  <timeStamp>" << timestamp() << "</timeStamp>\n";
+		xml << "  <nameHash>" << xml_escape(pack) << "</nameHash>\n";
+		xml << "  <contentChangeSets />\n";
+		xml << "  <contentChangeSetGroups>\n";
+		xml << "    <Item>\n";
+		xml << "      <NameHash>GROUP_STARTUP</NameHash>\n";
+		xml << "      <ContentChangeSets>\n";
+		xml << "        <Item>" << xml_escape(pack) << "_AUTOGEN</Item>\n";
+		xml << "      </ContentChangeSets>\n";
+		xml << "    </Item>\n";
+		xml << "    <Item>\n";
+		xml << "      <NameHash>GROUP_EARLY_ON</NameHash>\n";
+		xml << "      <ContentChangeSets>\n";
+		xml << "        <Item>" << xml_escape(ccsInit) << "</Item>\n";
+		xml << "      </ContentChangeSets>\n";
+		xml << "    </Item>\n";
+		xml << "    <Item>\n";
+		xml << "      <NameHash>GROUP_MAP</NameHash>\n";
+		xml << "      <ContentChangeSets>\n";
+		xml << "        <Item>" << xml_escape(kMapMpStreamChangeSet) << "</Item>\n";
+		xml << "      </ContentChangeSets>\n";
+		xml << "    </Item>\n";
+		xml << "    <Item>\n";
+		xml << "      <NameHash>GROUP_UPDATE_STREAMING</NameHash>\n";
+		xml << "      <ContentChangeSets>\n";
+		xml << "        <Item>" << xml_escape(ccsStreaming) << "</Item>\n";
+		xml << "        <Item>" << xml_escape(ccsStreamingMap) << "</Item>\n";
+		xml << "      </ContentChangeSets>\n";
+		xml << "    </Item>\n";
+		xml << "    <Item>\n";
+		xml << "      <NameHash>GROUP_UPDATE_TEXT</NameHash>\n";
+		xml << "      <ContentChangeSets>\n";
+		xml << "        <Item>" << xml_escape(ccsText) << "</Item>\n";
+		xml << "      </ContentChangeSets>\n";
+		xml << "    </Item>\n";
+		xml << "  </contentChangeSetGroups>\n";
+		xml << "  <type>EXTRACONTENT_LEVEL_PACK</type>\n";
+		xml << "  <order value=\"" << kMapDlcOrder << "\" />\n";
+		xml << "  <minorOrder value=\"0\" />\n";
+		xml << "  <isLevelPack value=\"true\" />\n";
+		xml << "</SSetupData>\n";
+		return xml.str();
+	}
+
+	struct MapArchives
+	{
+		bool models = false;
+		bool metadata = false;
+		bool pdoccl = false;
+		bool strmfile = false;
+		bool mpstrm = false;
+	};
+
+	void write_map_rpf_item(std::ostringstream& xml, const std::string& device,
+		const char* archive, bool disabled, bool overlay, bool locked,
+		bool persistent, bool contentsMapData)
+	{
+		xml << "    <Item>\n";
+		xml << "      <filename>" << xml_escape(device) << ":/"
+			<< map_archive_path(archive) << "</filename>\n";
+		xml << "      <fileType>RPF_FILE</fileType>\n";
+		if (locked)
+			xml << "      <locked value=\"true\" />\n";
+		xml << "      <overlay value=\"" << (overlay ? "true" : "false") << "\" />\n";
+		xml << "      <disabled value=\"" << (disabled ? "true" : "false") << "\" />\n";
+		xml << "      <persistent value=\"" << (persistent ? "true" : "false") << "\" />\n";
+		if (contentsMapData)
+			xml << "      <contents>CONTENTS_DLC_MAP_DATA</contents>\n";
+		xml << "    </Item>\n";
+	}
+
+	std::string build_map_content(const std::string& pack,
+		const std::vector<StagedDataFile>& dataFiles, const MapArchives& archives)
+	{
+		const std::string device = "dlc_" + pack;
+
+		std::ostringstream xml;
+		xml << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+		xml << "<CDataFileMgr__ContentsOfDataFileXml>\n";
+		xml << "  <disabledFiles />\n";
+		xml << "  <includedXmlFiles />\n";
+		xml << "  <includedDataFiles />\n";
+		xml << "  <dataFiles>\n";
+
+		// Models/metadata and stock-name overlays (pdoccl/strmfile) start enabled.
+		// Overlays that replace retail ymaps must stay resident: toggling them from
+		// STREAMING_MAP alone lets the engine tear the replacement down with the
+		// sector and crash on leave/re-enter. mpstrm still waits for GROUP_MAP /
+		// MPHEIST like retail heist map DLCs.
+		if (archives.models)
+			write_map_rpf_item(xml, device, kMapModelsArchive, false, false, false, false, false);
+		if (archives.metadata)
+			write_map_rpf_item(xml, device, kMapMetadataArchive, false, false, false, false, true);
+		if (archives.pdoccl)
+			write_map_rpf_item(xml, device, kMapPdocclArchive, false, true, false, true, true);
+		if (archives.strmfile)
+			write_map_rpf_item(xml, device, kMapStrmfileArchive, false, true, true, true, true);
+		if (archives.mpstrm)
+			write_map_rpf_item(xml, device, kMapMpstrmArchive, true, false, false, true, true);
+
+		for (const auto& file : dataFiles)
+		{
+			xml << "    <Item>\n";
+			xml << "      <filename>" << xml_escape(device) << ":/" << xml_escape(file.name)
+				<< "</filename>\n";
+			xml << "      <fileType>" << xml_escape(file.type) << "</fileType>\n";
+			xml << "      <overlay value=\"false\" />\n";
+			xml << "      <disabled value=\"true\" />\n";
+			const bool persistentScenario =
+				_stricmp(file.type.c_str(), "SCENARIO_POINTS_FILE") == 0;
+			xml << "      <persistent value=\"" << (persistentScenario ? "true" : "false")
+				<< "\" />\n";
+			xml << "    </Item>\n";
+		}
+
+		xml << "  </dataFiles>\n";
+		xml << "  <contentChangeSets>\n";
+
+		xml << "    <Item>\n";
+		xml << "      <changeSetName>" << xml_escape(pack) << "_AUTOGEN</changeSetName>\n";
+		xml << "      <filesToDisable />\n";
+		xml << "      <filesToEnable>\n";
+		for (const auto& file : dataFiles)
+			xml << "        <Item>" << xml_escape(device) << ":/" << xml_escape(file.name)
+				<< "</Item>\n";
+		xml << "      </filesToEnable>\n";
+		xml << "    </Item>\n";
+
+		xml << "    <Item>\n";
+		xml << "      <changeSetName>CCS_" << xml_escape(pack)
+			<< "_NG_STREAMING_MAP</changeSetName>\n";
+		xml << "      <filesToEnable>\n";
+		if (archives.models)
+			xml << "        <Item>" << xml_escape(device) << ":/"
+				<< map_archive_path(kMapModelsArchive) << "</Item>\n";
+		if (archives.metadata)
+			xml << "        <Item>" << xml_escape(device) << ":/"
+				<< map_archive_path(kMapMetadataArchive) << "</Item>\n";
+		// pdoccl/strmfile are already enabled above; do not re-bind them here.
+		xml << "      </filesToEnable>\n";
+		xml << "      <executionConditions>\n";
+		xml << "        <activeChangesetConditions>\n";
+		xml << "        </activeChangesetConditions>\n";
+		xml << "        <genericConditions>$level=MO_JIM_L11</genericConditions>\n";
+		xml << "      </executionConditions>\n";
+		xml << "    </Item>\n";
+
+		if (archives.mpstrm)
+		{
+			xml << "    <Item>\n";
+			xml << "      <changeSetName>" << xml_escape(kMapMpStreamChangeSet)
+				<< "</changeSetName>\n";
+			xml << "      <mapChangeSetData>\n";
+			xml << "        <Item>\n";
+			xml << "          <associatedMap>MO_JIM_L11</associatedMap>\n";
+			xml << "          <filesToEnable>\n";
+			xml << "            <Item>" << xml_escape(device) << ":/"
+				<< map_archive_path(kMapMpstrmArchive) << "</Item>\n";
+			xml << "          </filesToEnable>\n";
+			xml << "        </Item>\n";
+			xml << "      </mapChangeSetData>\n";
+			xml << "      <requiresLoadingScreen value=\"true\" />\n";
+			xml << "      <loadingScreenContext>LOADINGSCREEN_CONTEXT_LAST_FRAME"
+				"</loadingScreenContext>\n";
+			xml << "      <useCacheLoader value=\"true\" />\n";
+			xml << "    </Item>\n";
+		}
+
+		xml << "  </contentChangeSets>\n";
+		xml << "  <patchFiles />\n";
+		xml << "</CDataFileMgr__ContentsOfDataFileXml>\n";
+		return xml.str();
+	}
+
 	std::string read_stamp(const fs::path& path)
 	{
 		std::ifstream in(path, std::ios::binary);
@@ -627,6 +945,9 @@ namespace dlcgen
 
 		if (fs::is_regular_file(outputRpf, ec))
 			log_source_changes(resource, sourcesPath);
+		else if (resource.isMap)
+			logger::write("fivem", "[gen] %s: no archive yet, building map level pack",
+				resource.name.c_str());
 		else
 			logger::write("fivem", "[gen] %s: no archive yet, building", resource.name.c_str());
 
@@ -636,6 +957,8 @@ namespace dlcgen
 
 		std::vector<StagedDataFile> stagedFiles;
 		std::set<std::string> usedNames;
+		bool hasStream = false;
+		MapArchives mapArchives;
 
 		for (const auto& file : resource.dataFiles)
 		{
@@ -650,10 +973,11 @@ namespace dlcgen
 			const std::string type = map_file_type(file.type);
 			const std::string relative = file.path;
 
-			// DLC_ITYP_REQUEST is resolved through content.xml against the pack
-			// device, so the typ has to keep a real path inside the archive.
-			// Everything else is data and may be flattened into data/.
-			if (_stricmp(type.c_str(), "DLC_ITYP_REQUEST") == 0)
+			// These types are addressed by pack-relative path in content.xml
+			// (retail map DLCs keep common/data/..., ityp keeps stream/...).
+			if (_stricmp(type.c_str(), "DLC_ITYP_REQUEST") == 0 ||
+				_stricmp(type.c_str(), "INTERIOR_PROXY_ORDER_FILE") == 0 ||
+				_stricmp(type.c_str(), "SCENARIO_POINTS_FILE") == 0)
 			{
 				if (stage_file(source, stage / fs::path(relative)))
 					stagedFiles.push_back({ type, relative });
@@ -668,45 +992,158 @@ namespace dlcgen
 				stagedFiles.push_back({ type, target });
 		}
 
-		// Streamed assets are flattened into the archive root; see kStreamArchive
-		// for why the prefix has to go and why the name is generic.
-		const fs::path streamRoot = stage / "x64" / kStreamArchive;
 		std::set<std::string> usedAssets;
-		bool hasStream = false;
-		for (const auto& asset : resource.assets)
+		std::vector<std::string> miloProxies;
+		bool hasInteriorProxyFile = false;
+		for (const auto& file : stagedFiles)
 		{
-			const fs::path source = resource.dir / fs::path(asset);
-			if (!fs::is_regular_file(source, ec))
-				continue;
-
-			const std::string basename = fs::path(asset).filename().string();
-			if (basename.empty())
-				continue;
-			if (!usedAssets.insert(lower_copy(basename)).second)
-			{
-				logger::write("fivem", "[gen] %s: %s and an earlier file share the name %s; "
-					"keeping the first", resource.name.c_str(), asset.c_str(), basename.c_str());
-				continue;
-			}
-
-			if (!stage_file(source, streamRoot / fs::path(basename)))
-				continue;
-			hasStream = true;
+			if (_stricmp(file.type.c_str(), "INTERIOR_PROXY_ORDER_FILE") == 0)
+				hasInteriorProxyFile = true;
 		}
 
-		if (stagedFiles.empty() && !hasStream)
+		if (resource.isMap)
+		{
+			// Layout copied from a working OpenIV map DLC (ron_247shop).
+			const fs::path levelsRoot = stage / "x64" / kMapLevelsDir;
+			const fs::path modelsRoot = levelsRoot / kMapModelsArchive;
+			const fs::path metadataRoot = levelsRoot / kMapMetadataArchive;
+			const fs::path pdocclRoot = levelsRoot / kMapPdocclArchive;
+			const fs::path strmfileRoot = levelsRoot / kMapStrmfileArchive;
+			const fs::path mpstrmRoot = levelsRoot / kMapMpstrmArchive;
+			std::set<std::string> usedStageNames;
+
+			for (const auto& asset : resource.assets)
+			{
+				const fs::path source = resource.dir / fs::path(asset);
+				if (!fs::is_regular_file(source, ec))
+					continue;
+
+				const std::string basename = fs::path(asset).filename().string();
+				if (basename.empty())
+					continue;
+				if (!usedAssets.insert(lower_copy(basename)).second)
+				{
+					logger::write("fivem", "[gen] %s: %s and an earlier file share the name %s; "
+						"keeping the first", resource.name.c_str(), asset.c_str(),
+						basename.c_str());
+					continue;
+				}
+
+				const std::string stagedName = map_stage_name(basename);
+				const MapBucket bucket = classify_map_asset(basename);
+				fs::path targetRoot = modelsRoot;
+				switch (bucket)
+				{
+				case MapBucket::Metadata: targetRoot = metadataRoot; break;
+				case MapBucket::Pdoccl: targetRoot = pdocclRoot; break;
+				case MapBucket::Strmfile: targetRoot = strmfileRoot; break;
+				case MapBucket::Mpstrm: targetRoot = mpstrmRoot; break;
+				case MapBucket::Models: default: break;
+				}
+
+				// Same output name in one archive would collide (e.g. two occl
+				// sources both wanting ch1_occl_03.ymap in different RPFs is fine;
+				// two into the same RPF is not).
+				const std::string stageKey = lower_copy(
+					std::to_string(static_cast<int>(bucket)) + "|" + stagedName);
+				if (!usedStageNames.insert(stageKey).second)
+				{
+					logger::write("fivem", "[gen] %s: skip %s — %s already staged in that archive",
+						resource.name.c_str(), asset.c_str(), stagedName.c_str());
+					continue;
+				}
+
+				if (!stage_file(source, targetRoot / fs::path(stagedName)))
+					continue;
+
+				switch (bucket)
+				{
+				case MapBucket::Metadata:
+					mapArchives.metadata = true;
+					if (ends_with_ci(stagedName, ".ymap") &&
+						is_interior_ymap(lower_copy(stagedName)))
+						miloProxies.push_back(interior_proxy_name(stagedName));
+					break;
+				case MapBucket::Pdoccl: mapArchives.pdoccl = true; break;
+				case MapBucket::Strmfile: mapArchives.strmfile = true; break;
+				case MapBucket::Mpstrm: mapArchives.mpstrm = true; break;
+				case MapBucket::Models: mapArchives.models = true; break;
+				}
+			}
+
+			if (!hasInteriorProxyFile && !miloProxies.empty())
+			{
+				const std::string relative = "common/data/interiorproxies.meta";
+				if (write_text(stage / fs::path(relative),
+						build_interior_proxies(resource.pack, miloProxies)))
+				{
+					stagedFiles.push_back({ "INTERIOR_PROXY_ORDER_FILE", relative });
+					hasInteriorProxyFile = true;
+					logger::write("fivem", "[gen] %s: wrote interiorproxies.meta for %zu interior(s)",
+						resource.name.c_str(), miloProxies.size());
+				}
+			}
+
+			logger::write("fivem",
+				"[gen] %s: map split models=%d metadata=%d pdoccl=%d strm=%d mpstrm=%d data=%zu",
+				resource.name.c_str(),
+				mapArchives.models ? 1 : 0, mapArchives.metadata ? 1 : 0,
+				mapArchives.pdoccl ? 1 : 0, mapArchives.strmfile ? 1 : 0,
+				mapArchives.mpstrm ? 1 : 0, stagedFiles.size());
+		}
+		else
+		{
+			// Streamed assets are flattened into the archive root; see
+			// kStreamArchive for why the prefix has to go and why the name is
+			// generic. This is the vehicle / prop path and must stay unchanged.
+			const fs::path streamRoot = stage / "x64" / kStreamArchive;
+			for (const auto& asset : resource.assets)
+			{
+				const fs::path source = resource.dir / fs::path(asset);
+				if (!fs::is_regular_file(source, ec))
+					continue;
+
+				const std::string basename = fs::path(asset).filename().string();
+				if (basename.empty())
+					continue;
+				if (!usedAssets.insert(lower_copy(basename)).second)
+				{
+					logger::write("fivem", "[gen] %s: %s and an earlier file share the name %s; "
+						"keeping the first", resource.name.c_str(), asset.c_str(),
+						basename.c_str());
+					continue;
+				}
+
+				if (!stage_file(source, streamRoot / fs::path(basename)))
+					continue;
+				hasStream = true;
+			}
+		}
+
+		if (stagedFiles.empty() && !hasStream && !mapArchives.models &&
+			!mapArchives.metadata && !mapArchives.pdoccl && !mapArchives.strmfile &&
+			!mapArchives.mpstrm)
 		{
 			error = "nothing to package (no data files and no streamed assets)";
 			return BuildResult::Failed;
 		}
 
-		// A layout reference that resolves to nothing is invisible in game, so it
-		// is worth a line here even though it does not stop the build.
-		check_layout_refs(resource.name, stage, stagedFiles);
+		if (!resource.isMap)
+		{
+			// A layout reference that resolves to nothing is invisible in game,
+			// so it is worth a line here even though it does not stop the build.
+			check_layout_refs(resource.name, stage, stagedFiles);
+		}
 
-		if (!write_text(stage / "setup2.xml", build_setup2(resource.pack)) ||
-			!write_text(stage / "content.xml",
-				build_content(resource.pack, stagedFiles, hasStream)))
+		const std::string setupXml = resource.isMap
+			? build_map_setup2(resource.pack)
+			: build_setup2(resource.pack);
+		const std::string contentXml = resource.isMap
+			? build_map_content(resource.pack, stagedFiles, mapArchives)
+			: build_content(resource.pack, stagedFiles, hasStream);
+
+		if (!write_text(stage / "setup2.xml", setupXml) ||
+			!write_text(stage / "content.xml", contentXml))
 		{
 			error = "cannot write setup2.xml/content.xml under " + stage.string();
 			return BuildResult::Failed;
@@ -729,7 +1166,9 @@ namespace dlcgen
 		// Marks the folder as generated so it is not mistaken for a hand-made
 		// pack when someone looks into the cache layer.
 		write_text(outputDir / "generated.txt",
-			"Generated by ZeroIV-Loader from a FiveM resource.\n"
+			std::string("Generated by ZeroIV-Loader from a FiveM resource.\n") +
+			(resource.isMap ? "Kind: map level pack (this_is_a_map).\n"
+				: "Kind: add-on / vehicle pack.\n") +
 			"Source: " + resource.dir.string() + "\n"
 			"Delete the whole .cache folder to force a rebuild.\n");
 

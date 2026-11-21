@@ -20,10 +20,13 @@
 	  fxmanifest.lua / __resource.lua
 	    data_file 'TYPE' 'path'   -> a dataFiles entry in content.xml
 	    stream/**                 -> the payload of x64/stream.rpf
+	    this_is_a_map 'yes'       -> dlcgen builds a level pack instead
+	                                (metadata.rpf / mapdata.rpf split)
 
 	Only what the manifest actually declares is trusted. Anything the scanner
 	cannot make sense of drops that one resource and leaves the rest alone: a
-	malformed manifest must never take the game down.
+	malformed manifest must never take the game down. Vehicle packs without
+	this_is_a_map keep the original COMPAT_PACK layout.
 */
 
 namespace
@@ -885,7 +888,11 @@ namespace fivem
 				static_cast<int>(resources.size()),
 				config::unpack_root().string().c_str());
 
-		std::vector<std::string> packs;
+		// Map level packs must mount before the long vehicle list: the engine
+		// stops OpenArchive'ing late dlclist entries, and a map stuck at the
+		// tail only ever ParseHeader'd — assets never streamed in-world.
+		std::vector<std::string> mapPacks;
+		std::vector<std::string> otherPacks;
 		std::vector<rsccompat::Hit> compatHits;
 		const bool warnIncompatible =
 			config::get_value<bool>("fivem", "warnIncompatibleResources", true);
@@ -910,11 +917,20 @@ namespace fivem
 				continue;
 			}
 
-			logger::write("fivem", "[init] %s -> .cache/dlcpacks/%s (%s)", resource.name.c_str(),
+			logger::write("fivem", "[init] %s -> .cache/dlcpacks/%s (%s%s)", resource.name.c_str(),
 				resource.pack.c_str(),
-				result == dlcgen::BuildResult::Reused ? "cached" : "built");
-			packs.push_back(resource.pack);
+				result == dlcgen::BuildResult::Reused ? "cached" : "built",
+				resource.isMap ? ", map" : "");
+			if (resource.isMap)
+				mapPacks.push_back(resource.pack);
+			else
+				otherPacks.push_back(resource.pack);
 		}
+
+		std::vector<std::string> packs;
+		packs.reserve(mapPacks.size() + otherPacks.size());
+		packs.insert(packs.end(), mapPacks.begin(), mapPacks.end());
+		packs.insert(packs.end(), otherPacks.begin(), otherPacks.end());
 
 		// A pack whose resource was deleted must lose its published link as well as
 		// its dlclist entry; see dlcgen::Prune. This runs even when nothing is left,
@@ -979,6 +995,8 @@ namespace fivem
 			std::set<std::string> seen(packs.begin(), packs.end());
 			for (const auto& name : discovered)
 			{
+				// Traditional add-ons stay after generated packs so map/vehicle
+				// ziv_* entries keep their early mount slots.
 				if (seen.insert(name).second)
 					packs.push_back(name);
 				claimableAddons.push_back(name);

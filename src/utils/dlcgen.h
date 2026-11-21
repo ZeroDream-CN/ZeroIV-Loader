@@ -9,14 +9,26 @@
 
 // Rebuilds a FiveM resource as a retail add-on DLC package.
 //
-// Layout:
+// Vehicle / prop layout (default):
 //
 //   unpack-mods/.cache/dlcpacks/<pack>/dlc.rpf    real archive, hidden cache
 //   mods/update/x64/dlcpacks/<pack>/dlc.rpf       hard link, what the engine mounts
-//     setup2.xml
+//     setup2.xml                                  EXTRACONTENT_COMPAT_PACK
 //     content.xml
 //     data/<data_file basenames>
 //     x64/stream.rpf/<streamed assets at the root>
+//
+// Map layout (fxmanifest this_is_a_map 'yes') — mirrors a working OpenIV map DLC:
+//
+//     setup2.xml                                  EXTRACONTENT_LEVEL_PACK
+//     content.xml                                 CONTENTS_DLC_MAP_DATA + overlays
+//     common/data/interiorproxies.meta
+//     common/data/sp_manifest.meta                when declared
+//     x64/levels/gta5/models.rpf
+//     x64/levels/gta5/metadata.rpf                _manifest / ytyp / milo
+//     x64/levels/gta5/pdoccl.rpf                  occlusion overlay
+//     x64/levels/gta5/strmfile.rpf                story strm overlay
+//     x64/levels/gta5/mpstrm.rpf                  hei_/MP strm
 //
 // The streaming objects must sit at the archive root: an object is identified by
 // its path relative to the packfile, so a `stream/` or `vehicles/` prefix would

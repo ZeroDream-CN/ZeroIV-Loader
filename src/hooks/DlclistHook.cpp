@@ -280,7 +280,10 @@ namespace
 	}
 
 	// Brings dlclist.xml in line with the generated packs: entries for packs that
-	// no longer exist are dropped, missing ones are appended.
+	// no longer exist are dropped, and every ziv_* line is rewritten in the order
+	// of `packs` (maps first — see fivem::Init). New packs used to be appended at
+	// the tail; once the engine stops OpenArchive'ing late add-ons, a map left at
+	// the end only ever ParseHeader'd and never streamed.
 	//
 	// Pruning is not cosmetic. A stale entry makes the engine try to mount an
 	// archive that is gone on every start, and a failed mount of a pack listed in
@@ -303,14 +306,22 @@ namespace
 			return {};
 		}
 
-		std::set<std::string> wanted;
+		// Preserve caller order (maps before vehicles). A set would alphabetize
+		// and push new packs to the tail again.
+		std::vector<std::string> wantedItems;
+		std::set<std::string> wantedSet;
+		wantedItems.reserve(packs.size());
 		for (const auto& pack : packs)
-			if (!pack.empty())
-				wanted.insert(pack_item(pack));
+		{
+			if (pack.empty())
+				continue;
+			const std::string item = pack_item(pack);
+			if (wantedSet.insert(item).second)
+				wantedItems.push_back(item);
+		}
 
-		// Walk the <Item> lines, keeping every one that is not a generated pack, or
-		// that is a generated pack still on disk; drop tracked traditional packs
-		// that disappeared from disk.
+		// Walk the <Item> lines. Generated ziv_* rows are always stripped so they
+		// can be re-appended in `packs` order; traditional rows stay unless prune.
 		added = 0;
 		removed = 0;
 		claimedAddons.clear();
@@ -338,7 +349,7 @@ namespace
 			const std::string value = trim(original.substr(valueStart, end - valueStart));
 			const bool generated = is_generated_pack(value);
 			const bool managedGone = set_contains_ci(pruneAddons, value);
-			const bool keep = (!generated || set_contains_ci(wanted, value)) && !managedGone;
+			const bool keep = !generated && !managedGone;
 			if (!keep)
 			{
 				// Drop the whole line, including its indentation and line break.
@@ -360,7 +371,7 @@ namespace
 		}
 
 		std::string insert;
-		for (const auto& item : wanted)
+		for (const auto& item : wantedItems)
 		{
 			if (contains_ci(kept, "<Item>" + item + "</Item>"))
 				continue;
