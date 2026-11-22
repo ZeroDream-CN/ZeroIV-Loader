@@ -111,8 +111,12 @@ jobs:
             `OpenRPF.asi` if present.
 
             ### Highlights
+            - `unpack-mods/` Relative remount (`zivmods:/`) for `common:/`, `platform:/`, `dlcpacks:/`
+            - `[overlay]` whitelist / blacklist in `ZeroIV.ini` — prefer loose visuals without replacing content metas
+            - GetDevice prefer keeps stock text / addon cars while still applying visual overrides
+            - Generated `ziv_*` packs also register under `GROUP_UPDATE_STREAMING` (setup2 v7)
             - FiveM vehicle resources under `unpack-mods/` → auto `ziv_*` DLC + `dlclist`
-            - Traditional `dlcpacks/` folders can be auto-registered (`registerAddonPacks`) with a tracked cleanup list
+            - Traditional `dlcpacks/` folders can be auto-registered (`registerAddonPacks`)
             - `gameconfig.xml`: Legacy vs Enhanced pool targets; optional user file or `patchGameConfig=off`
             - Warns when Gen8 assets are on Enhanced (or Gen9 on Legacy)
             - Enhanced: runtime NG key extract via `magic.dat` + `ZeroIV.ngdata.bin` cache

@@ -47,13 +47,15 @@ Two layouts are supported and they can be combined:
 
 - `mods/` — OpenIV-style per-file redirection. A file that exists under `mods/`
   replaces the stock asset with the same path (handled by `FileReadHooks`).
-- `unpack-mods/` — the unpacked layer. It only carries the subtrees it
-  overrides, so `unpack-mods/dlcpacks/<pack>/dlc.rpf` serves
-  `update/x64/dlcpacks/<pack>/dlc.rpf`, and the same applies to `platform/` and
-  `common/`. The directory is mounted at a private `unpack-mods:/` prefix and a
-  path is redirected to it only when the file exists there, so the retail packs
-  keep loading from their stock devices. A missing `unpack-mods/` changes
-  nothing. Set `[config] modsOverride = false` to skip this layer entirely.
+- `unpack-mods/` — the unpacked layer. It is mounted at a private `zivmods:/`
+  prefix; `common:/`, `platform:/` and `dlcpacks:/` are remounted onto it so
+  loose files and published packs can win over stock. Which loose
+  `common/`/`platform/` files are preferred is controlled by `[overlay]` in
+  `ZeroIV.ini` (default: visuals / weather / timecycle whitelist; content
+  metas such as `gta5.meta` stay on stock). `unpack-mods/dlcpacks/<pack>/dlc.rpf`
+  and generated `ziv_*` packs under `mods/update/x64/dlcpacks/` are served the
+  same way. A missing `unpack-mods/` changes nothing. Set
+  `[config] modsOverride = false` to skip this layer entirely.
 
 A `dlc.rpf` that is a directory rather than an archive is supported in both
 layouts: GTA V Enhanced cannot mount a directory as a packfile, so the folder is
@@ -113,6 +115,13 @@ delivered as soon as it starts.
 console = false
 modsOverride = true
 
+[overlay]
+; whitelist | blacklist | off — which unpack-mods common/platform files win
+mode = whitelist
+; relative to common:/ or platform:/; trailing / or * = prefix; deny wins
+allow = data/visualsettings.dat,data/timecycle/,data/levels/gta5/weather/,...
+deny = data/gameconfig.xml,data/dlclist.xml,data/levels/gta5/gta5.meta,data/carcols.ymt,...
+
 [log]
 ; Per-file-operation traces. Each category is opt-in because these hooks fire
 ; hundreds of times per second; the loader also throttles and collapses them.
@@ -126,6 +135,9 @@ enabled = true
 host = 127.0.0.1
 port = 27183
 ```
+
+`[overlay]` defaults are written on first launch if missing. Prefer only the
+visual / weather / timecycle set so addon vehicles and stock text keep loading.
 
 `[debugConsole]` controls the forwarder. The port must match the listener built
 into ZeroIV (`logbridge.go`, default `27183`). The `[log]` switches enable the
@@ -328,7 +340,7 @@ to forbid it no longer applies.
   submodule or download step is needed.
 - **Version traceability**: `VERSION` is the single source of truth for the
   release number, and the build records the commit. The startup log line
-  (`ZeroIV-Loader 1.2.0+abcdef12 inited`) ties a binary back to its tree.
+  (`ZeroIV-Loader 1.3.0+abcdef12 inited`) ties a binary back to its tree.
 - **Binaries**: when distributing ZeroIV.asi, ship `LICENSE.txt` and
   `THIRD-PARTY-NOTICES.txt` alongside it. MinHook (BSD-2-Clause) and inipp
   (MIT) both require their notice to accompany binary distributions.
