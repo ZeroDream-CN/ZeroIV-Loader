@@ -1,5 +1,6 @@
 #include "main.h"
 #include "FileReadHooks.h"
+#include "CustomDevice.h"
 #include <cctype>
 #include <cstring>
 #include <mutex>
@@ -102,6 +103,11 @@ static bool TryOverlayPath(const char* path, std::string& outPath)
 
     // The unpack layer holds each overridden subtree at its root, so the
     // `update/x64/` prefix the engine probes has to be dropped before joining.
+    //
+    // Do NOT auto-map the whole `common/` or `platform/` trees from
+    // unpack-mods here: a partial common dump redirected wholesale over stock
+    // paths soft-locks story mode. Visual overrides go through [overlay]
+    // whitelist / GetDevice prefer instead.
     static const std::string kUpdateX64 = "update/x64/";
     if (lowered.compare(0, kUpdateX64.size(), kUpdateX64) == 0)
     {
@@ -196,6 +202,20 @@ static HANDLE OpenBulkImpl(void* device, const char* path, __int64* a3, OpenBulk
     if (path)
         forensics::note_file(path);
 
+    // unpack-mods overlay must be opened on the overlay fiDeviceLocal. Feeding
+    // a filesystem path back into the stock/packfile device makes common/
+    // platform overrides look "installed but not loading" (and can soft-lock
+    // when partially redirected through the wrong device).
+    {
+        rage::fiDevice* overlay = nullptr;
+        std::string overlayPath;
+        if (unpackdev::ResolveOpen(path, overlay, overlayPath) && overlay)
+        {
+            logger::write("mods", "[%s] Overlay device %s", __FUNCTION__, overlayPath.c_str());
+            return overlay->OpenBulk(overlayPath.c_str(), reinterpret_cast<uint64_t*>(a3));
+        }
+    }
+
     std::string modsPath;
     const char* source = nullptr;
     if (ResolveRedirect(path, modsPath, source))
@@ -262,6 +282,18 @@ static FILETIME GetFileTimeImpl(void* device, const char* path, GetFileTimeFn or
 {
     logger::log("info", "[%s] Called with path /%s", __FUNCTION__, path);
 
+    {
+        rage::fiDevice* overlay = nullptr;
+        std::string overlayPath;
+        if (unpackdev::ResolveOpen(path, overlay, overlayPath) && overlay)
+        {
+            FILETIME ft{};
+            const uint64_t t = overlay->GetFileTime(overlayPath.c_str());
+            *reinterpret_cast<uint64_t*>(&ft) = t;
+            return ft;
+        }
+    }
+
     std::string modsPath;
     const char* source = nullptr;
     if (ResolveRedirect(path, modsPath, source))
@@ -276,6 +308,13 @@ static uint64_t GetFileSizeImpl(void* device, const char* path, GetFileSizeFn or
 {
     logger::log("info", "[%s] Called with path /%s", __FUNCTION__, path);
 
+    {
+        rage::fiDevice* overlay = nullptr;
+        std::string overlayPath;
+        if (unpackdev::ResolveOpen(path, overlay, overlayPath) && overlay)
+            return overlay->GetFileSize(overlayPath.c_str());
+    }
+
     std::string modsPath;
     const char* source = nullptr;
     if (ResolveRedirect(path, modsPath, source))
@@ -289,6 +328,13 @@ static uint64_t GetFileSizeImpl(void* device, const char* path, GetFileSizeFn or
 static uint64_t GetAttribsImpl(void* device, const char* path, GetAttrsFn orig)
 {
     logger::log("info", "[%s] Called with path /%s", __FUNCTION__, path);
+
+    {
+        rage::fiDevice* overlay = nullptr;
+        std::string overlayPath;
+        if (unpackdev::ResolveOpen(path, overlay, overlayPath) && overlay)
+            return overlay->GetAttributes(overlayPath.c_str());
+    }
 
     std::string modsPath;
     const char* source = nullptr;

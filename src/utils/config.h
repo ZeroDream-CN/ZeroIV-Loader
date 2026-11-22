@@ -71,6 +71,11 @@ public:
 		// in-memory NG stamp once plainifyRpf has rewritten payloads.
 		add_default<bool>("config", "allowUnencryptedRpf", true, added);
 		add_default<bool>("config", "dumpImage", false, added);
+		// Patches the Enhanced D3D12 CopyDescriptors call site so a null
+		// descriptor from a Gen8->Gen9 binder can be diagnosed. On some native
+		// Windows + NVIDIA setups the stub itself has been seen to take the
+		// process down during Streamline init; set false to rule that out.
+		add_default<bool>("config", "bindDescriptors", true, added);
 		add_default<bool>("fivem", "enabled", true, added);
 		add_default<bool>("fivem", "patchStockUpdateRpf", false, added);
 		// On: decrypt every flag-1 payload and write an OPEN TOC so update.rpf
@@ -97,6 +102,40 @@ public:
 		add_default<std::string>("paths", "mods", "", added);
 		add_default<std::string>("paths", "unpackMods", "", added);
 		add_default<std::string>("ui", "language", "auto", added);
+		// Prefer unpack-mods common/platform files over stock. whitelist = only
+		// `allow` paths; blacklist = everything except `deny`; off = never.
+		// Patterns are relative to common:/ or platform:/ (no mount prefix).
+		// Trailing `/` or `*` = prefix match; otherwise exact. deny always wins.
+		add_default<std::string>("overlay", "mode", "whitelist", added);
+		add_default<std::string>("overlay", "allow",
+			"data/visualsettings.dat,"
+			"data/clouds.xml,"
+			"data/cloudkeyframes.xml,"
+			"data/CloudKeyframes.xml,"
+			"data/watertune.xml,"
+			"data/lensflare_f.xml,"
+			"data/lensflare_m.xml,"
+			"data/lensflare_t.xml,"
+			"data/levels/gta5/weather.xml,"
+			"data/levels/gta5/time.xml,"
+			"data/levels/gta5/water.xml,"
+			"levels/gta5/zonebind.ymt,"
+			"data/metadata/explosion.ymt,"
+			"data/timecycle/,"
+			"data/levels/gta5/weather/,"
+			"data/effects/,"
+			"textures/,"
+			"levels/gta5/cloudhats/",
+			added);
+		add_default<std::string>("overlay", "deny",
+			"data/gameconfig.xml,"
+			"data/dlclist.xml,"
+			"data/levels/gta5/gta5.meta,"
+			"data/gtxd.meta,"
+			"data/ai/weapons.meta,"
+			"data/materials/procedural.meta,"
+			"data/carcols.ymt",
+			added);
 		if (added)
 			save();
 

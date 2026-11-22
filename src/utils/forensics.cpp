@@ -856,10 +856,16 @@ namespace forensics
 				return EXCEPTION_CONTINUE_SEARCH;
 			}
 
-			// C++ exceptions are thrown by normal code, and informational or
-			// warning codes are not fatal. Only errors (0xC......) and the
-			// deliberate breakpoint are worth recording.
-			const bool fatal = (code & 0xC0000000) == 0xC0000000 || code == 0x80000003;
+			// C++ exceptions (0xE06D7363) are thrown by normal code — DirectStorage
+			// does this during native-Windows start-up — and informational or
+			// warning codes are not fatal. Only NT error codes (top nibble 0xC)
+			// and the deliberate breakpoint are worth recording.
+			//
+			// The previous check used (code & 0xC0000000) == 0xC0000000, which
+			// also matched 0xE....... because both set the severity bits. That
+			// armed the fatal watchdog on a handled C++ throw and killed a
+			// healthy session with TerminateProcess(1) ten seconds later.
+			const bool fatal = (code & 0xF0000000) == 0xC0000000 || code == 0x80000003;
 			if (fatal)
 				report(info);
 

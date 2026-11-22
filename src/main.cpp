@@ -51,7 +51,10 @@ void HookGetSystemTimeAsFileTime(LPFILETIME lpSystemTimeAsFileTime)
 
 		logger::write("info", "hooks: installing");
 
-		bindhooks::install();
+		if (config::get_value<bool>("config", "bindDescriptors", true))
+			bindhooks::install();
+		else
+			logger::write("info", "bind: skipped (config.bindDescriptors=false)");
 
 		memory::InitFuncs::run();
 

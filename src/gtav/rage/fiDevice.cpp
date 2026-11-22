@@ -86,17 +86,29 @@ namespace
 HANDLE rage::fiDeviceLocal::Open(const char* fileName, bool readOnly)
 {
 	logger::log("device", "[%s] %s", __FUNCTION__, fileName);
-	HANDLE handle = new std::ifstream(ToFullPath(fileName), std::ios::in | std::ios::binary);
+	if (!fileName || !*fileName)
+		return nullptr;
+	const std::string full = ToFullPath(fileName);
+	auto* stream = new std::ifstream(full, std::ios::in | std::ios::binary);
+	if (!stream->is_open())
+	{
+		delete stream;
+		logger::write("device", "[%s] failed to open %s (%s)", __FUNCTION__, fileName, full.c_str());
+		return nullptr;
+	}
+	HANDLE handle = stream;
 	set_handle_name(handle, fileName);
 	return handle;
 }
 
 uint32_t rage::fiDeviceLocal::ReadFile(HANDLE handle, void* buffer, uint32_t length)
 {
+	if (!handle || handle == INVALID_HANDLE_VALUE || !buffer)
+		return 0;
 	logger::log("device", "[%s] %s %d", __FUNCTION__, handle_name(handle).c_str(), length);
 	auto file = (std::ifstream*)handle;
 	file->read((char*)buffer, length);
-	return file->gcount();
+	return static_cast<uint32_t>(file->gcount());
 }
 
 uint32_t rage::fiDeviceLocal::ReadBulk(HANDLE handle, uint64_t offset, char* buffer, uint32_t length)
@@ -200,6 +212,20 @@ std::string rage::fiDeviceLocal::ToFullPath(const char* fileName) const
 
 uint32_t rage::fiDeviceLocal::GetAttributes(const char* fileName)
 {
+	if (!fileName || !*fileName)
+		return INVALID_FILE_ATTRIBUTES;
+	// fiPackfile keeps an 8-byte path head. When the mount is exactly 8 chars
+	// (`zeroiv:/`), probes of that head alone mean "does this device exist?" —
+	// answer as a directory. Longer mounts corrupted the head (e.g. `ziv:/pla`)
+	// and must not be treated as real paths.
+	if (!mountPrefix.empty() && _stricmp(fileName, mountPrefix.c_str()) == 0)
+		return FILE_ATTRIBUTE_DIRECTORY;
+	if (strlen(fileName) <= 8 && !strchr(fileName + (strchr(fileName, ':') ? 1 : 0), '/'))
+	{
+		// Head-only garbage that is not our mount — not a file we serve.
+		if (strchr(fileName, ':') && _stricmp(fileName, mountPrefix.c_str()) != 0)
+			return INVALID_FILE_ATTRIBUTES;
+	}
 	uint32_t attributes = ::GetFileAttributesA(ToFullPath(fileName).c_str());
 	if (attributes != INVALID_FILE_ATTRIBUTES)
 		logger::log("device", "[%s] %s", __FUNCTION__, fileName);
@@ -296,13 +322,15 @@ bool rage::fiDeviceLocal::SetEndOfFile(HANDLE handle)
 bool rage::fiDeviceLocal::SafeRead(HANDLE handle, void* buffer, uint32_t length)
 {
 	logger::log("device", "[%s]", __FUNCTION__);
+	if (!handle || handle == INVALID_HANDLE_VALUE || !buffer)
+		return false;
 	uint32_t offset = 0;
-	if (length <= 0)
+	if (length == 0)
 		return true;
 	for (;;)
 	{
 		uint32_t bytesRead = ReadFile(handle, (char*)buffer + offset, length - offset);
-		if (bytesRead < 0)
+		if (bytesRead == 0)
 			break;
 		offset += bytesRead;
 		if (offset >= length)

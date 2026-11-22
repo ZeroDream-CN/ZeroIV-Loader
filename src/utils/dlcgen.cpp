@@ -31,7 +31,9 @@ namespace
 	//   6: setup2.xml is written with an order above every stock pack, so a
 	//      layout or handling definition owned by a retail DLC exists before
 	//      this pack's vehicles are registered.
-	constexpr int kGeneratorVersion = 6;
+	//   7: also register the change set under GROUP_UPDATE_STREAMING so Enhanced
+	//      still applies high-order COMPAT packs after common:/ remount.
+	constexpr int kGeneratorVersion = 7;
 
 	// The sequence number written to setup2.xml's <order>.
 	//
@@ -61,6 +63,33 @@ namespace
 	const char* kStreamArchive = "stream.rpf";
 
 	constexpr size_t npos = std::string::npos;
+
+	// Staging lives under ZeroIVLoose/fivem/<pack>/stage. After the archive is
+	// written (or the build aborts) the stage tree is deleted, but the empty
+	// pack / fivem / ZeroIVLoose parents used to remain. Walk up and drop every
+	// empty ancestor that still sits under the cache root.
+	void remove_stage_tree(const fs::path& stage)
+	{
+		std::error_code ec;
+		fs::remove_all(stage, ec);
+
+		const fs::path cacheRoot = config::cache_root();
+		fs::path cur = stage.parent_path();
+		while (!cur.empty())
+		{
+			if (!fs::is_directory(cur, ec))
+				break;
+			if (!fs::is_empty(cur, ec))
+				break;
+
+			const bool atCacheRoot = cur == cacheRoot;
+			const fs::path parent = cur.parent_path();
+			fs::remove(cur, ec);
+			if (atCacheRoot)
+				break;
+			cur = parent;
+		}
+	}
 
 	std::string lower_copy(std::string value)
 	{
@@ -397,6 +426,12 @@ namespace
 		xml << "        <Item>" << xml_escape(pack) << "_AUTOGEN</Item>\n";
 		xml << "      </ContentChangeSets>\n";
 		xml << "    </Item>\n";
+		xml << "    <Item>\n";
+		xml << "      <NameHash>GROUP_UPDATE_STREAMING</NameHash>\n";
+		xml << "      <ContentChangeSets>\n";
+		xml << "        <Item>" << xml_escape(pack) << "_AUTOGEN</Item>\n";
+		xml << "      </ContentChangeSets>\n";
+		xml << "    </Item>\n";
 		xml << "  </contentChangeSetGroups>\n";
 		xml << "  <type>EXTRACONTENT_COMPAT_PACK</type>\n";
 		xml << "  <order value=\"" << kDlcOrder << "\" />\n";
@@ -631,7 +666,7 @@ namespace dlcgen
 			logger::write("fivem", "[gen] %s: no archive yet, building", resource.name.c_str());
 
 		const fs::path stage = config::cache_root() / "fivem" / resource.pack / "stage";
-		fs::remove_all(stage, ec);
+		remove_stage_tree(stage);
 		fs::create_directories(stage, ec);
 
 		std::vector<StagedDataFile> stagedFiles;
@@ -697,6 +732,7 @@ namespace dlcgen
 		if (stagedFiles.empty() && !hasStream)
 		{
 			error = "nothing to package (no data files and no streamed assets)";
+			remove_stage_tree(stage);
 			return BuildResult::Failed;
 		}
 
@@ -709,6 +745,7 @@ namespace dlcgen
 				build_content(resource.pack, stagedFiles, hasStream)))
 		{
 			error = "cannot write setup2.xml/content.xml under " + stage.string();
+			remove_stage_tree(stage);
 			return BuildResult::Failed;
 		}
 
@@ -716,6 +753,7 @@ namespace dlcgen
 		if (!loosepack::BuildTo(stage, outputRpf, buildError))
 		{
 			error = "archive: " + buildError;
+			remove_stage_tree(stage);
 			return BuildResult::Failed;
 		}
 
@@ -734,7 +772,7 @@ namespace dlcgen
 			"Delete the whole .cache folder to force a rebuild.\n");
 
 		// Nothing else reads the staging tree once the archive exists.
-		fs::remove_all(stage, ec);
+		remove_stage_tree(stage);
 
 		return BuildResult::Built;
 	}
