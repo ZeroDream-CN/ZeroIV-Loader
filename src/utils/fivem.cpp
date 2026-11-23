@@ -20,6 +20,7 @@
 	  fxmanifest.lua / __resource.lua
 	    data_file 'TYPE' 'path'   -> a dataFiles entry in content.xml
 	    stream/**                 -> the payload of x64/stream.rpf
+	    AUDIO_* / AUDIO_WAVEPACK  -> x64/audio/... (see dlcgen)
 
 	Only what the manifest actually declares is trusted. Anything the scanner
 	cannot make sense of drops that one resource and leaves the rest alone: a
@@ -248,15 +249,60 @@ namespace
 
 	bool is_asset_ext(const std::string& ext)
 	{
+		// .awc belongs to AUDIO_WAVEPACK folders, not to stream.rpf.
 		static const char* kExts[] = {
 			".yft", ".ytd", ".ydr", ".ybn", ".ytyp", ".ymap", ".yed", ".yfd",
 			".yld", ".ycd", ".ypt", ".ynv", ".yvr", ".ymf", ".ygr", ".ycs",
-			".ybd", ".awc",
+			".ybd",
 		};
 		for (const char* candidate : kExts)
 			if (ext == candidate)
 				return true;
 		return false;
+	}
+
+	bool is_audio_wavepack(const std::string& type)
+	{
+		return _stricmp(type.c_str(), "AUDIO_WAVEPACK") == 0;
+	}
+
+	// Retail audio mounters append a typed suffix (.dat151, .dat54, …) to the
+	// logical `.dat` name from content.xml. FiveM manifests declare that logical
+	// name; the bytes on disk are almost always the `.rel` form.
+	const char* audio_rel_suffix(const std::string& type)
+	{
+		if (_stricmp(type.c_str(), "AUDIO_GAMEDATA") == 0) return ".dat151.rel";
+		if (_stricmp(type.c_str(), "AUDIO_SOUNDDATA") == 0) return ".dat54.rel";
+		if (_stricmp(type.c_str(), "AUDIO_SYNTHDATA") == 0) return ".dat10.rel";
+		if (_stricmp(type.c_str(), "AUDIO_DYNAMIXDATA") == 0) return ".dat15.rel";
+		if (_stricmp(type.c_str(), "AUDIO_SPEECHDATA") == 0) return ".dat4.rel";
+		if (_stricmp(type.c_str(), "AUDIO_CURVEDATA") == 0) return ".dat13.rel";
+		return nullptr;
+	}
+
+	// Resolves a manifest audio path to the file that actually exists.
+	// Tries the declared path first, then the typed `.rel` next to it.
+	std::string resolve_audio_data_path(const fs::path& root, const std::string& declared,
+		const std::string& type)
+	{
+		std::error_code ec;
+		const fs::path exact = root / fs::path(declared);
+		if (fs::is_regular_file(exact, ec))
+			return declared;
+
+		const char* suffix = audio_rel_suffix(type);
+		if (!suffix)
+			return {};
+
+		std::string stem = declared;
+		if (ends_with(lower_copy(stem), ".dat"))
+			stem.resize(stem.size() - 4);
+
+		const std::string candidate = stem + suffix;
+		if (fs::is_regular_file(root / fs::path(candidate), ec))
+			return candidate;
+
+		return {};
 	}
 
 	// Filename-to-data_file-type fallback for resources that only declare
@@ -278,6 +324,13 @@ namespace
 		if (name == "weaponcomponents.meta") return "WEAPONCOMPONENTSINFO_FILE";
 		if (name.find("gtxd") != npos && ends_with(name, ".meta")) return "GTXD_PARENTING_DATA";
 		if (ends_with(name, ".ytyp")) return "DLC_ITYP_REQUEST";
+
+		// Audio configs: match the logical FiveM name or the on-disk .rel form.
+		if (name.find("_game.dat") != npos) return "AUDIO_GAMEDATA";
+		if (name.find("_sounds.dat") != npos) return "AUDIO_SOUNDDATA";
+		if (name.find("_amp.dat") != npos) return "AUDIO_SYNTHDATA";
+		if (name.find("_mix.dat") != npos) return "AUDIO_DYNAMIXDATA";
+		if (name.find("_speech.dat") != npos) return "AUDIO_SPEECHDATA";
 		return {};
 	}
 
@@ -403,7 +456,52 @@ namespace
 			add(manifestRel.generic_string());
 
 		for (const auto& file : res.dataFiles)
+		{
+			if (is_audio_wavepack(file.type))
+			{
+				// A wavepack is a folder of .awc files; track every file inside
+				// so editing one sample invalidates the DLC cache.
+				std::error_code ec;
+				const fs::path root = res.dir / fs::path(file.path);
+				if (!fs::is_directory(root, ec))
+				{
+					add(file.path);
+					continue;
+				}
+				for (fs::recursive_directory_iterator it(root, ec), end; !ec && it != end;
+					it.increment(ec))
+				{
+					std::error_code fileEc;
+					if (!it->is_regular_file(fileEc))
+						continue;
+					std::error_code childEc;
+					const fs::path child = fs::relative(it->path(), res.dir, childEc);
+					if (!childEc)
+						add(child.generic_string());
+				}
+				continue;
+			}
+
+			if (audio_rel_suffix(file.type))
+			{
+				const std::string resolved =
+					resolve_audio_data_path(res.dir, file.path, file.type);
+				add(resolved.empty() ? file.path : resolved);
+
+				// Optional nametable beside the .rel (retail ships both).
+				if (!resolved.empty() && ends_with(lower_copy(resolved), ".rel"))
+				{
+					std::string table = resolved.substr(0, resolved.size() - 4);
+					table += ".nametable";
+					std::error_code ec;
+					if (fs::is_regular_file(res.dir / fs::path(table), ec))
+						add(table);
+				}
+				continue;
+			}
+
 			add(file.path);
+		}
 		for (const auto& asset : res.assets)
 			add(asset);
 

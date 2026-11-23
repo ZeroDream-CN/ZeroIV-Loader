@@ -16,11 +16,16 @@
 //     setup2.xml
 //     content.xml
 //     data/<data_file basenames>
+//     x64/audio/<name>_game.dat151.rel            AUDIO_GAMEDATA (etc.)
+//     x64/audio/sfx/<wavepack>/*.awc              AUDIO_WAVEPACK (plain folder)
 //     x64/stream.rpf/<streamed assets at the root>
 //
 // The streaming objects must sit at the archive root: an object is identified by
 // its path relative to the packfile, so a `stream/` or `vehicles/` prefix would
 // register the model under that name and the game would never find it.
+//
+// Audio follows retail (e.g. mptuner): content.xml names logical `.dat` paths
+// under %PLATFORM%/audio/ and wavepack folders (not nested .rpf archives).
 //
 // The archive is produced by loosepack, which already knows how to turn a
 // directory tree into an RPF7 and how to nest a directory named *.rpf.

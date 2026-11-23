@@ -1,6 +1,7 @@
 #include "main.h"
 #include "utils/dlcgen.h"
 
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -33,7 +34,9 @@ namespace
 	//      this pack's vehicles are registered.
 	//   7: also register the change set under GROUP_UPDATE_STREAMING so Enhanced
 	//      still applies high-order COMPAT packs after common:/ remount.
-	constexpr int kGeneratorVersion = 7;
+	//   8: AUDIO_* configs land under x64/audio/ and AUDIO_WAVEPACK is a plain
+	//      folder of .awc files (matching retail mptuner), not stream.rpf.
+	constexpr int kGeneratorVersion = 8;
 
 	// The sequence number written to setup2.xml's <order>.
 	//
@@ -266,12 +269,101 @@ namespace
 		std::string name;   // pack-relative path used in content.xml
 	};
 
-	// One pack-internal name per staged file. Two metadata files sharing a
-	// basename is common enough (several `vehicles.meta`) that collisions are
-	// resolved instead of overwriting each other.
-	std::string unique_name(const std::string& basename, std::set<std::string>& used)
+	bool ends_with_ci(const std::string& value, const std::string& tail)
 	{
-		std::string candidate = "data/" + basename;
+		if (value.size() < tail.size())
+			return false;
+		for (size_t i = 0; i < tail.size(); ++i)
+		{
+			const unsigned char a = static_cast<unsigned char>(value[value.size() - tail.size() + i]);
+			const unsigned char b = static_cast<unsigned char>(tail[i]);
+			if (::tolower(a) != ::tolower(b))
+				return false;
+		}
+		return true;
+	}
+
+	bool is_audio_wavepack(const std::string& type)
+	{
+		return _stricmp(type.c_str(), "AUDIO_WAVEPACK") == 0;
+	}
+
+	const char* audio_rel_suffix(const std::string& type)
+	{
+		if (_stricmp(type.c_str(), "AUDIO_GAMEDATA") == 0) return ".dat151.rel";
+		if (_stricmp(type.c_str(), "AUDIO_SOUNDDATA") == 0) return ".dat54.rel";
+		if (_stricmp(type.c_str(), "AUDIO_SYNTHDATA") == 0) return ".dat10.rel";
+		if (_stricmp(type.c_str(), "AUDIO_DYNAMIXDATA") == 0) return ".dat15.rel";
+		if (_stricmp(type.c_str(), "AUDIO_SPEECHDATA") == 0) return ".dat4.rel";
+		if (_stricmp(type.c_str(), "AUDIO_CURVEDATA") == 0) return ".dat13.rel";
+		return nullptr;
+	}
+
+	bool is_audio_data_type(const std::string& type)
+	{
+		return audio_rel_suffix(type) != nullptr;
+	}
+
+	// Logical stem used in content.xml (`foo_game` from `foo_game.dat` /
+	// `foo_game.dat151.rel`).
+	std::string audio_logical_stem(std::string path)
+	{
+		const size_t slash = path.find_last_of("/\\");
+		if (slash != npos)
+			path = path.substr(slash + 1);
+
+		const std::string lower = lower_copy(path);
+		static const char* kStrip[] = {
+			".dat151.rel", ".dat54.rel", ".dat10.rel", ".dat15.rel",
+			".dat4.rel", ".dat13.rel",
+			".dat151", ".dat54", ".dat10", ".dat15", ".dat4", ".dat13",
+			".dat",
+		};
+		for (const char* suffix : kStrip)
+		{
+			const size_t len = std::strlen(suffix);
+			if (lower.size() >= len &&
+				lower.compare(lower.size() - len, len, suffix) == 0)
+			{
+				path.resize(path.size() - len);
+				break;
+			}
+		}
+		return path;
+	}
+
+	// FiveM declares `common/data/foo_game.dat`; the bytes are usually
+	// `foo_game.dat151.rel` beside it.
+	fs::path resolve_audio_source(const fs::path& root, const std::string& declared,
+		const std::string& type)
+	{
+		std::error_code ec;
+		const fs::path exact = root / fs::path(declared);
+		if (fs::is_regular_file(exact, ec))
+			return exact;
+
+		const char* suffix = audio_rel_suffix(type);
+		if (!suffix)
+			return {};
+
+		std::string stemPath = declared;
+		if (ends_with_ci(stemPath, ".dat"))
+			stemPath.resize(stemPath.size() - 4);
+
+		const fs::path candidate = root / fs::path(stemPath + suffix);
+		if (fs::is_regular_file(candidate, ec))
+			return candidate;
+
+		return {};
+	}
+
+	// Reserves a unique pack-relative path under prefix/ (e.g. data/ or
+	// x64/audio/). content.xml for audio uses a separate logical name.
+	std::string unique_under(const std::string& prefix, const std::string& basename,
+		std::set<std::string>& used)
+	{
+		const std::string folder = prefix.empty() ? std::string() : prefix + "/";
+		std::string candidate = folder + basename;
 		if (used.insert(lower_copy(candidate)).second)
 			return candidate;
 
@@ -281,11 +373,48 @@ namespace
 
 		for (int index = 2; index < 1000; ++index)
 		{
-			candidate = "data/" + stem + "_" + std::to_string(index) + ext;
+			candidate = folder + stem + "_" + std::to_string(index) + ext;
 			if (used.insert(lower_copy(candidate)).second)
 				return candidate;
 		}
-		return {}; // unreachable in practice
+		return {};
+	}
+
+	// One pack-internal name per staged file. Two metadata files sharing a
+	// basename is common enough (several `vehicles.meta`) that collisions are
+	// resolved instead of overwriting each other.
+	std::string unique_name(const std::string& basename, std::set<std::string>& used)
+	{
+		return unique_under("data", basename, used);
+	}
+
+	// Copies every regular file under sourceDir into targetDir (flat: wavepacks
+	// are a single folder of .awc files in retail, not a nested tree).
+	bool stage_wavepack_dir(const fs::path& sourceDir, const fs::path& targetDir,
+		std::string& error)
+	{
+		std::error_code ec;
+		fs::create_directories(targetDir, ec);
+
+		bool any = false;
+		for (fs::directory_iterator it(sourceDir, ec), end; !ec && it != end; it.increment(ec))
+		{
+			std::error_code fileEc;
+			if (!it->is_regular_file(fileEc))
+				continue;
+			if (!stage_file(it->path(), targetDir / it->path().filename()))
+			{
+				error = "cannot stage " + it->path().string();
+				return false;
+			}
+			any = true;
+		}
+		if (!any)
+		{
+			error = "wavepack folder is empty: " + sourceDir.string();
+			return false;
+		}
+		return true;
 	}
 
 	// Names of every layout the retail game defines. Loaded from the embedded
@@ -674,16 +803,114 @@ namespace dlcgen
 
 		for (const auto& file : resource.dataFiles)
 		{
-			const fs::path source = resource.dir / fs::path(file.path);
-			if (!fs::is_regular_file(source, ec))
+			const std::string type = map_file_type(file.type);
+			const std::string relative = file.path;
+
+			// AUDIO_WAVEPACK points at a folder of .awc files. Retail stores it
+			// as a plain directory under x64/audio/sfx/<name>/ (not a nested
+			// RPF); content.xml names that folder without a .rpf suffix.
+			if (is_audio_wavepack(type))
 			{
-				logger::write("fivem", "[gen] %s: missing %s", resource.name.c_str(),
-					file.path.c_str());
+				const fs::path sourceDir = resource.dir / fs::path(relative);
+				if (!fs::is_directory(sourceDir, ec))
+				{
+					logger::write("fivem", "[gen] %s: missing wavepack folder %s",
+						resource.name.c_str(), relative.c_str());
+					continue;
+				}
+
+				const std::string folderName = fs::path(relative).filename().string();
+				if (folderName.empty() || folderName == "." || folderName == "..")
+				{
+					logger::write("fivem", "[gen] %s: bad wavepack path %s",
+						resource.name.c_str(), relative.c_str());
+					continue;
+				}
+
+				const std::string stageRel = "x64/audio/sfx/" + folderName;
+				if (!usedNames.insert(lower_copy(stageRel)).second)
+				{
+					logger::write("fivem", "[gen] %s: duplicate wavepack %s; keeping the first",
+						resource.name.c_str(), folderName.c_str());
+					continue;
+				}
+
+				std::string stageError;
+				if (!stage_wavepack_dir(sourceDir, stage / fs::path(stageRel), stageError))
+				{
+					logger::write("fivem", "[gen] %s: %s", resource.name.c_str(),
+						stageError.c_str());
+					continue;
+				}
+
+				stagedFiles.push_back({ type, std::string("%PLATFORM%/audio/sfx/") + folderName });
 				continue;
 			}
 
-			const std::string type = map_file_type(file.type);
-			const std::string relative = file.path;
+			// AUDIO_* configs: resolve FiveM's logical `.dat` to the on-disk
+			// `.datNN.rel`, stage under x64/audio/, and declare the logical
+			// `%PLATFORM%/audio/<stem>.dat` name the audio mounter expects.
+			// The staged basename must match that stem -- the engine looks up
+			// stem.dat151.rel from the logical name, so collisions are skipped
+			// rather than renamed.
+			if (is_audio_data_type(type))
+			{
+				const fs::path source =
+					resolve_audio_source(resource.dir, relative, type);
+				if (source.empty())
+				{
+					logger::write("fivem", "[gen] %s: missing audio data %s",
+						resource.name.c_str(), relative.c_str());
+					continue;
+				}
+
+				const char* suffix = audio_rel_suffix(type);
+				const std::string stem = audio_logical_stem(relative);
+				if (stem.empty() || !suffix)
+					continue;
+
+				const std::string stageRel = std::string("x64/audio/") + stem + suffix;
+				if (!usedNames.insert(lower_copy(stageRel)).second)
+				{
+					logger::write("fivem", "[gen] %s: duplicate audio data %s; keeping the first",
+						resource.name.c_str(), stem.c_str());
+					continue;
+				}
+
+				if (!stage_file(source, stage / fs::path(stageRel)))
+					continue;
+
+				// Optional nametable next to the .rel (retail ships both).
+				if (ends_with_ci(source.filename().string(), ".rel"))
+				{
+					std::string tableFile = source.filename().string();
+					tableFile.resize(tableFile.size() - 4);
+					tableFile += ".nametable";
+					const fs::path tableSrc = source.parent_path() / tableFile;
+
+					std::string typed = stem + suffix; // e.g. foo_game.dat151.rel
+					typed.resize(typed.size() - 4);
+					typed += ".nametable";
+					const std::string tableRel = std::string("x64/audio/") + typed;
+					if (fs::is_regular_file(tableSrc, ec) &&
+						usedNames.insert(lower_copy(tableRel)).second)
+					{
+						stage_file(tableSrc, stage / fs::path(tableRel));
+					}
+				}
+
+				stagedFiles.push_back({ type,
+					std::string("%PLATFORM%/audio/") + stem + ".dat" });
+				continue;
+			}
+
+			const fs::path source = resource.dir / fs::path(relative);
+			if (!fs::is_regular_file(source, ec))
+			{
+				logger::write("fivem", "[gen] %s: missing %s", resource.name.c_str(),
+					relative.c_str());
+				continue;
+			}
 
 			// DLC_ITYP_REQUEST is resolved through content.xml against the pack
 			// device, so the typ has to keep a real path inside the archive.
